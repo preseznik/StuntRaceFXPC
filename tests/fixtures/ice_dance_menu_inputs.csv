@@ -1,0 +1,11 @@
+# USA Rev 1. One-based video fields from cold boot with empty records.
+# Stunt Trax, default 4WD, AAA, UP from Rock Field, then PLAY on Ice Dance.
+# The first trailer image appears at field 2560 (191 fields after accepting PLAY).
+711,718,0008
+1042,1042,0020
+1183,1183,0008
+1363,1363,0008
+1543,1543,0008
+2109,2109,0010
+2159,2159,0008
+2369,2369,0008

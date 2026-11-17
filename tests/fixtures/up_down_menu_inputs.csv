@@ -1,0 +1,11 @@
+# USA Rev 1. One-based cartridge video fields from a cold boot, no preexisting records.
+# Stunt Trax -> 4WD -> AAA -> RIGHT to Up'n Down -> records -> PLAY.
+# 2319: empty records. 2558: first visible trailer. 2929: 50 seconds, 0 stars.
+711,718,0008
+1042,1042,0020
+1183,1183,0008
+1363,1363,0008
+1543,1543,0008
+2109,2109,0080
+2159,2159,0008
+2369,2369,0008

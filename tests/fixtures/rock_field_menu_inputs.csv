@@ -1,0 +1,12 @@
+# USA Rev 1, cold boot. tools/reference_snes9x.py input intervals use one-based video fields.
+# Game Selection -> Stunt Trax -> 4WD -> AAA -> Rock Field -> Play.
+# Field 2108: four course cards. 2283: empty records. 2653: trailer. 3023: green.
+# At field 3283 the parked car has collected its first star.
+711,718,0008
+1042,1042,0020
+1183,1183,0008
+1363,1363,0008
+1543,1543,0008
+2143,2143,0008
+2343,2343,0008
+2663,2663,0008

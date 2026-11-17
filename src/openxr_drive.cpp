@@ -1,0 +1,255 @@
+#include "openxr_drive.hpp"
+#define XR_USE_PLATFORM_WIN32
+#define XR_USE_GRAPHICS_API_D3D11
+#include <openxr/openxr.h>
+#include <openxr/openxr_platform.h>
+#include <wrl/client.h>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <stdexcept>
+#include <vector>
+
+namespace srf::vr {
+using Microsoft::WRL::ComPtr;
+namespace {
+void require(XrResult result,const char* where) {
+    if(XR_FAILED(result))throw std::runtime_error(std::string(where)+" (OpenXR "+std::to_string(result)+")");
+}
+constexpr XrPosef identity{{0,0,0,1},{0,0,0}};
+constexpr auto stereo=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+template<class T,class F> auto enumerate(T initial,F f,const char* where) {
+    uint32_t count{};
+    require(f(0,&count,nullptr),where);
+    std::vector<T> list(count,initial);
+    if(count)require(f(count,&count,list.data()),where);
+    list.resize(count);
+    return list;
+}
+Eye scene_eye(const XrView& view) {
+    const auto& [q,p]=view.pose;
+    const auto& f=view.fov;
+    return {{p.x,p.y,-p.z},{-q.x,-q.y,q.z,q.w},
+            std::tan(f.angleLeft),std::tan(f.angleRight),std::tan(f.angleDown),std::tan(f.angleUp)};
+}
+XrPosef seat_origin(XrPosef head) {
+    const auto q=head.orientation;
+    const float yaw=std::atan2(2*(q.x*q.z+q.w*q.y),1-2*(q.x*q.x+q.y*q.y));
+    head.orientation={0,std::sin(yaw/2),0,std::cos(yaw/2)};
+    return head;
+}
+constexpr int hud_width=960,hud_height=148;
+class HudBitmap {
+    HDC dc=CreateCompatibleDC(nullptr);
+    HBITMAP bitmap{};
+    HFONT font{};
+    HGDIOBJ old_bitmap{},old_font{};
+    void* bits{};
+public:
+    HudBitmap() {
+        BITMAPINFO info{};auto& h=info.bmiHeader;
+        h.biSize=sizeof(h);h.biWidth=hud_width;h.biHeight=-hud_height;h.biPlanes=1;h.biBitCount=32;
+        bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+        font=CreateFontW(-43,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
+                         ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+        if(!dc || !bitmap || !font)throw std::runtime_error("Could not create VR instruments");
+        old_bitmap=SelectObject(dc,bitmap);old_font=SelectObject(dc,font);SetBkMode(dc,TRANSPARENT);
+    }
+    ~HudBitmap(){SelectObject(dc,old_font);SelectObject(dc,old_bitmap);DeleteObject(font);DeleteObject(bitmap);DeleteDC(dc);}
+    const void* paint(const Display& hud) {
+        RECT bounds{0,0,hud_width,hud_height};FillRect(dc,&bounds,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        RECT top{12,4,hud_width-12,74},bottom{12,74,hud_width-12,144};
+        SetTextColor(dc,RGB(255,255,255));
+        DrawTextW(dc,hud.instruments.c_str(),-1,&top,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        SetTextColor(dc,RGB(218,218,218));
+        DrawTextW(dc,hud.message.c_str(),-1,&bottom,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        GdiFlush();
+        auto* pixels=static_cast<uint32_t*>(bits);
+        for(int i=0;i<hud_width*hud_height;++i)pixels[i]|=0xff000000;
+        return bits;
+    }
+};
+struct Images {
+    XrSwapchain chain{};
+    XrSwapchainSubImage area{};
+    std::vector<XrSwapchainImageD3D11KHR> images;
+    void create(XrSession session,int w,int h,DXGI_FORMAT format,bool hud) {
+        XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+        create.usageFlags=XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | (hud?XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT:0);
+        create.format=format;create.sampleCount=create.faceCount=create.arraySize=create.mipCount=1;
+        create.width=w;create.height=h;
+        require(xrCreateSwapchain(session,&create,&chain),"Creating headset image");
+        area={chain,{{0,0},{w,h}},0};
+        images=enumerate(XrSwapchainImageD3D11KHR{XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR},
+            [&](auto n,auto* count,XrSwapchainImageD3D11KHR* out){return xrEnumerateSwapchainImages(chain,n,count,
+                reinterpret_cast<XrSwapchainImageBaseHeader*>(out));},"Enumerating D3D11 headset images");
+    }
+    void write(const auto& draw) {
+        XrSwapchainImageAcquireInfo a{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        XrSwapchainImageWaitInfo w{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO,nullptr,XR_INFINITE_DURATION};
+        XrSwapchainImageReleaseInfo r{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};uint32_t index{};
+        require(xrAcquireSwapchainImage(chain,&a,&index),"Acquiring headset image");
+        require(xrWaitSwapchainImage(chain,&w),"Waiting for headset image");
+        try {draw(images.at(index).texture);} catch(...){xrReleaseSwapchainImage(chain,&r);throw;}
+        require(xrReleaseSwapchainImage(chain,&r),"Releasing headset image");
+    }
+};
+}
+struct Drive::Impl {
+    std::ostream& log;
+    XrInstance instance{};XrSystemId system{};XrSession session{};
+    XrSpace local{},seat{},head{};
+    XrSessionState state=XR_SESSION_STATE_UNKNOWN;
+    ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
+    DXGI_FORMAT format{};
+    Images eyes[2],hud;
+    HudBitmap bitmap;
+    Display last;
+    bool running=false,quit=false,recenter=true,have_hud=false;
+    XrTime space_change{};
+    uint64_t frames{},projections{},recenters{},missed_periods{};
+    uint64_t draw_ns{},long_draws{},peak_draw_ns{};
+    XrTime last_time{};XrDuration period{};
+    explicit Impl(std::ostream& stream):log(stream){}
+    ~Impl(){
+        if(context)context->ClearState();
+        for(auto* item:{&hud,&eyes[1],&eyes[0]})if(item->chain)xrDestroySwapchain(item->chain);
+        for(auto space:{head,seat,local})if(space)xrDestroySpace(space);
+        if(session)xrDestroySession(session);
+        if(instance)xrDestroyInstance(instance);
+        log<<"Frames "<<frames<<", stereo submissions "<<projections<<", recenters "<<recenters
+           <<", skipped predicted display periods "<<missed_periods<<std::endl;
+        if(projections)log<<"App work before submission (includes image waits): mean "<<draw_ns/1e6/projections
+            <<" ms, worst "<<peak_draw_ns/1e6<<" ms, over predicted period "<<long_draws<<std::endl;
+    }
+    XrSpace space(XrReferenceSpaceType type,XrPosef pose) {
+        XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO,nullptr,type,pose};XrSpace result{};
+        require(xrCreateReferenceSpace(session,&info,&result),"Creating seated reference space");return result;
+    }
+    void initialize() {
+        const char* extensions[]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+        XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
+        std::strcpy(ci.applicationInfo.applicationName,"Stunt Race FX PC");
+        ci.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
+        ci.enabledExtensionCount=1;ci.enabledExtensionNames=extensions;
+        require(xrCreateInstance(&ci,&instance),"Starting OpenXR. Connect the headset and enable a Windows D3D11 OpenXR runtime");
+        XrInstanceProperties props{XR_TYPE_INSTANCE_PROPERTIES};
+        require(xrGetInstanceProperties(instance,&props),"Reading runtime");log<<"Runtime "<<props.runtimeName<<std::endl;
+        XrSystemGetInfo si{XR_TYPE_SYSTEM_GET_INFO,nullptr,XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY};
+        require(xrGetSystem(instance,&si,&system),"Finding connected headset");
+        auto modes=enumerate(XrEnvironmentBlendMode{},[&](auto n,auto* c,XrEnvironmentBlendMode* p){
+            return xrEnumerateEnvironmentBlendModes(instance,system,stereo,n,c,p);},"Checking stereo display mode");
+        if(std::find(modes.begin(),modes.end(),XR_ENVIRONMENT_BLEND_MODE_OPAQUE)==modes.end())
+            throw std::runtime_error("A stereo headset with opaque display mode is required");
+        PFN_xrGetD3D11GraphicsRequirementsKHR get{};
+        require(xrGetInstanceProcAddr(instance,"xrGetD3D11GraphicsRequirementsKHR",reinterpret_cast<PFN_xrVoidFunction*>(&get)),"Getting D3D11 requirements");
+        XrGraphicsRequirementsD3D11KHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};require(get(instance,system,&req),"Reading headset GPU");
+        ComPtr<IDXGIFactory1> factory;
+        if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))throw std::runtime_error("DXGI factory unavailable");
+        for(UINT i=0;;++i){
+            ComPtr<IDXGIAdapter1> adapter;if(FAILED(factory->EnumAdapters1(i,&adapter)))break;
+            DXGI_ADAPTER_DESC1 d{};if(FAILED(adapter->GetDesc1(&d)))continue;
+            if(d.AdapterLuid.LowPart!=req.adapterLuid.LowPart || d.AdapterLuid.HighPart!=req.adapterLuid.HighPart)continue;
+            const auto level=std::max(D3D_FEATURE_LEVEL_11_0,req.minFeatureLevel);
+            if(SUCCEEDED(D3D11CreateDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,&level,1,D3D11_SDK_VERSION,&device,nullptr,&context)))break;
+        }
+        if(!device)throw std::runtime_error("Cannot create D3D11 device on the headset runtime's GPU");
+        XrGraphicsBindingD3D11KHR bind{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR,nullptr,device.Get()};
+        XrSessionCreateInfo sc{XR_TYPE_SESSION_CREATE_INFO,&bind,0,system};require(xrCreateSession(instance,&sc,&session),"Opening headset session");
+        local=space(XR_REFERENCE_SPACE_TYPE_LOCAL,identity);seat=space(XR_REFERENCE_SPACE_TYPE_LOCAL,identity);head=space(XR_REFERENCE_SPACE_TYPE_VIEW,identity);
+        auto config=enumerate(XrViewConfigurationView{XR_TYPE_VIEW_CONFIGURATION_VIEW},[&](auto n,auto* c,XrViewConfigurationView* p){
+            return xrEnumerateViewConfigurationViews(instance,system,stereo,n,c,p);},"Reading stereo target sizes");
+        if(config.size()!=2)throw std::runtime_error("The runtime did not provide two stereo views");
+        auto formats=enumerate(int64_t{},[&](auto n,auto* c,int64_t* p){return xrEnumerateSwapchainFormats(session,n,c,p);},"Reading headset image formats");
+        for(auto f:{DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_B8G8R8A8_UNORM})
+            if(std::find(formats.begin(),formats.end(),f)!=formats.end()){format=f;break;}
+        if(!format)throw std::runtime_error("No supported headset color format");
+        for(int i=0;i<2;++i)eyes[i].create(session,config[i].recommendedImageRectWidth,config[i].recommendedImageRectHeight,format,false);
+        hud.create(session,hud_width,hud_height,format,true);
+        log<<"Eye targets "<<config[0].recommendedImageRectWidth<<'x'<<config[0].recommendedImageRectHeight
+           <<" and "<<config[1].recommendedImageRectWidth<<'x'<<config[1].recommendedImageRectHeight<<std::endl;
+    }
+    void events(){
+        for(;;){
+            XrEventDataBuffer ev{XR_TYPE_EVENT_DATA_BUFFER};
+            auto r=xrPollEvent(instance,&ev);if(r==XR_EVENT_UNAVAILABLE)break;
+            require(r,"Reading OpenXR events");
+            if(ev.type==XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING){quit=true;return;}
+            if(ev.type==XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING){
+                const auto& changed=reinterpret_cast<const XrEventDataReferenceSpaceChangePending&>(ev);
+                if(changed.referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL)space_change=changed.changeTime;
+            }
+            if(ev.type!=XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)continue;
+            state=reinterpret_cast<const XrEventDataSessionStateChanged&>(ev).state;
+            log<<"Session state "<<int(state)<<std::endl;
+            if(state==XR_SESSION_STATE_READY){
+                XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO,nullptr,stereo};
+                require(xrBeginSession(session,&begin),"Beginning stereo session");running=true;last_time=0;recenter=true;
+            }else if(state==XR_SESSION_STATE_STOPPING){
+                require(xrEndSession(session),"Ending stereo session");running=false;
+            }else if(state==XR_SESSION_STATE_EXITING || state==XR_SESSION_STATE_LOSS_PENDING)quit=true;
+        }
+    }
+    void frame(const Update& update,const Draw& draw){
+        XrFrameState f{XR_TYPE_FRAME_STATE};XrFrameWaitInfo w{XR_TYPE_FRAME_WAIT_INFO};XrFrameBeginInfo b{XR_TYPE_FRAME_BEGIN_INFO};
+        require(xrWaitFrame(session,&w,&f),"Waiting for headset frame");
+        require(xrBeginFrame(session,&b),"Beginning headset frame");++frames;
+        const auto started=std::chrono::steady_clock::now();
+        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO,nullptr,f.predictedDisplayTime,XR_ENVIRONMENT_BLEND_MODE_OPAQUE};
+        try {
+            if(period!=f.predictedDisplayPeriod){period=f.predictedDisplayPeriod;log<<"Predicted display period "<<period<<" ns"<<std::endl;}
+            if(last_time && period>0 && f.predictedDisplayTime-last_time>period*3/2)
+                missed_periods+=(f.predictedDisplayTime-last_time+period/2)/period-1;
+            last_time=f.predictedDisplayTime;
+            if(space_change && f.predictedDisplayTime>=space_change){recenter=true;space_change=0;}
+            if(recenter && f.shouldRender){
+                XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};require(xrLocateSpace(head,local,f.predictedDisplayTime,&loc),"Locating seated head");
+                const auto valid=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
+                if((loc.locationFlags&valid)==valid){
+                    auto next=space(XR_REFERENCE_SPACE_TYPE_LOCAL,seat_origin(loc.pose));xrDestroySpace(seat);seat=next;recenter=false;++recenters;
+                }
+            }
+            XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO,nullptr,stereo,f.predictedDisplayTime,seat};
+            XrView views[2]={{XR_TYPE_VIEW},{XR_TYPE_VIEW}};
+            XrViewState vs{XR_TYPE_VIEW_STATE};uint32_t count{};
+            if(f.shouldRender)require(xrLocateViews(session,&locate,&vs,2,&count,views),"Locating eyes at display time");
+            const auto valid=XR_VIEW_STATE_POSITION_VALID_BIT|XR_VIEW_STATE_ORIENTATION_VALID_BIT;
+            const bool visible=f.shouldRender && count==2 && (vs.viewStateFlags&valid)==valid;
+            auto display=update(f.predictedDisplayTime,visible && state==XR_SESSION_STATE_FOCUSED);
+            recenter|=display.recenter;
+            XrCompositionLayerProjectionView pv[2]={{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+            XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION,nullptr,0,seat,2,pv};
+            XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD,nullptr,0,seat,XR_EYE_VISIBILITY_BOTH,hud.area,
+                                       {{0,0,0,1},{0,-.37f,-1.45f}},{1.03f,1.03f*hud_height/hud_width}};
+            const XrCompositionLayerBaseHeader* layers[]={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+                                                         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
+            if(visible){
+                for(int i=0;i<2;++i){
+                    pv[i].pose=views[i].pose;pv[i].fov=views[i].fov;pv[i].subImage=eyes[i].area;
+                    eyes[i].write([&](auto texture){draw(texture,format,scene_eye(views[i]));context->OMSetRenderTargets(0,nullptr,nullptr);});
+                }
+                if(!have_hud || display.instruments!=last.instruments || display.message!=last.message){
+                    auto pixels=bitmap.paint(display);
+                    hud.write([&](auto texture){context->UpdateSubresource(texture,0,nullptr,pixels,hud_width*4,0);});
+                    have_hud=true;last=display;
+                }
+                end.layerCount=2;end.layers=layers;++projections;
+                const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count();
+                draw_ns+=ns;peak_draw_ns=std::max(peak_draw_ns,uint64_t(ns));long_draws+=ns>period;
+            }
+            // Layer structures must remain alive through xrEndFrame.
+            auto result=xrEndFrame(session,&end);end.type=XR_TYPE_UNKNOWN;require(result,"Submitting stereo frame");
+        }catch(...){if(end.type!=XR_TYPE_UNKNOWN){end.layerCount=0;end.layers=nullptr;xrEndFrame(session,&end);}throw;}
+    }
+};
+Drive::Drive(std::ostream& log):impl(std::make_unique<Impl>(log)){impl->initialize();}
+Drive::~Drive()=default;
+ID3D11Device* Drive::device() const{return impl->device.Get();}
+void Drive::run(const std::function<bool()>& pump,const Update& update,const Draw& draw){
+    while(pump()){
+        impl->events();if(impl->quit)break;
+        if(impl->running)impl->frame(update,draw);else Sleep(10);
+    }
+}
+}
