@@ -181,6 +181,13 @@ internal static class CommandLine
         try { BuildPipeline.ContentArguments(current, "unknown", false); } catch (ArgumentException) { invalid = true; }
         check(invalid, "Unknown car is rejected before launch");
         var gameBuild = legacy with { ContentVersion = 2 };
+        check(BuildPipeline.FrameArguments(29, true, 60, 120, 75).SequenceEqual(new[]{"--vr-hz","120","--vr-scale","75"}) &&
+              BuildPipeline.FrameArguments(29, false, 60, 120, 75).SequenceEqual(new[]{"--desktop-fps","60"}),
+              "VR refresh and desktop FPS are routed to their own displays");
+        check(BuildPipeline.FrameArguments(28, true, 60, 0, 100).Length == 0, "Previous VR build accepts default settings");
+        bool oldFrames = false;
+        try { BuildPipeline.FrameArguments(28, true, 0, 120, 75); } catch (InvalidOperationException) { oldFrames = true; }
+        check(oldFrames,"Previous VR build requests a rebuild for custom settings");
         check(BuildPipeline.ContentArguments(gameBuild, "f-type", true).SequenceEqual(new[] { "--car", "f-type", "--borderless", "--course", "easy-ride" }),
             "Current builds receive the selected car, display mode and course");
         check(BuildPipeline.EntryPointArgument(gameBuild, true) == "--game" && BuildPipeline.EntryPointArgument(gameBuild, false) == "--race",
@@ -230,11 +237,18 @@ internal static class CommandLine
                     form.Shown += (_, _) => form.BeginInvoke(() =>
                     {
                         car.SelectedIndex = 2; course.SelectedIndex = course.Items.Count - 1;
+                        ((ComboBox)form.Controls.Find("DesktopFps", true).Single()).SelectedIndex = 2;
+                        ((ComboBox)form.Controls.Find("VrRefresh", true).Single()).SelectedIndex = 4;
+                        ((ComboBox)form.Controls.Find("VrScale", true).Single()).SelectedIndex = 2;
                         resolution.SelectedIndex = 3; mode.SelectedIndex = 1; form.Close();
                     });
                     form.ShowDialog();
                 }
                 using var restored = new MainForm(settings);
+                if (((ComboBox)restored.Controls.Find("DesktopFps", true).Single()).Text != "60 FPS" ||
+                    ((ComboBox)restored.Controls.Find("VrRefresh", true).Single()).Text != "120 Hz" ||
+                    ((ComboBox)restored.Controls.Find("VrScale", true).Single()).Text != "75%")
+                    throw new InvalidOperationException("Frame settings did not persist");
                 if (((ComboBox)restored.Controls.Find("LaunchMode", true).Single()).Text != "Quick Race" ||
                     ((ComboBox)restored.Controls.Find("PlayerCar", true).Single()).Text != "F-TYPE" ||
                     ((ComboBox)restored.Controls.Find("Course", true).Single()).Text != GameContent.Courses[^1].Name ||

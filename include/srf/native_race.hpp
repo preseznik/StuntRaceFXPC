@@ -30,7 +30,8 @@ public:
     // Optional proportional steering uses original slew/recenter behavior.
     // Digital input and full stick deflection retain the exact legacy path.
     void step(std::uint16_t controls, std::uint8_t elapsed_clock_ticks = 4,
-              std::optional<std::int16_t> steering = std::nullopt);
+              std::optional<std::int16_t> steering = std::nullopt,
+              std::array<Vehicle,4>* halfway = nullptr);
     const std::array<Vehicle,4>& racers() const { return racers_; }
     static constexpr std::size_t player_index() { return 3; }
     std::uint64_t phase() const { return phase_; }

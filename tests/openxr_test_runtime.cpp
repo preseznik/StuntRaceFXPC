@@ -21,6 +21,8 @@ struct Space {XrPosef origin;};
 ComPtr<ID3D11Device> gpu;
 int chain_count{},events{},frame{},submissions{},recenter_count{};
 bool waited{},begun{},session_running{};
+bool advertises_refresh{},refresh_enabled{};
+float requested_rate{};
 constexpr XrPosef identity{{0,0,0,1},{0,0,0}};
 template<class T> XrResult one(T value,uint32_t capacity,uint32_t* count,T* out){
     *count=1;if(capacity)out[0]=value;return XR_SUCCESS;
@@ -35,16 +37,34 @@ XrResult XRAPI_CALL requirements(XrInstance,XrSystemId,XrGraphicsRequirementsD3D
     ensure(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && SUCCEEDED(factory->EnumAdapters1(0,&adapter)) && SUCCEEDED(adapter->GetDesc1(&desc)));
     out->adapterLuid=desc.AdapterLuid;out->minFeatureLevel=D3D_FEATURE_LEVEL_11_0;return XR_SUCCESS;
 }
+XrResult XRAPI_CALL refresh_choices(XrSession,uint32_t n,uint32_t* c,float* out){
+    ensure(refresh_enabled);*c=2;if(n){ensure(n>=2);out[0]=90;out[1]=120;}return XR_SUCCESS;
+}
+XrResult XRAPI_CALL request_rate(XrSession,float rate){
+    ensure(session_running && refresh_enabled && (rate==90 || rate==120));requested_rate=rate;return XR_SUCCESS;
+}
 }
 extern "C" {
+XRAPI_ATTR XrResult XRAPI_CALL xrEnumerateInstanceExtensionProperties(const char*,uint32_t n,uint32_t* c,XrExtensionProperties* p){
+    *c=advertises_refresh?2:1;
+    if(n){ensure(n>=*c);std::strcpy(p[0].extensionName,XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
+        if(advertises_refresh)std::strcpy(p[1].extensionName,XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);}
+    return XR_SUCCESS;
+}
 XRAPI_ATTR XrResult XRAPI_CALL xrCreateInstance(const XrInstanceCreateInfo* info,XrInstance* out){
-    ensure(info->enabledExtensionCount==1 && !strcmp(info->enabledExtensionNames[0],XR_KHR_D3D11_ENABLE_EXTENSION_NAME));
+    ensure(!strcmp(info->enabledExtensionNames[0],XR_KHR_D3D11_ENABLE_EXTENSION_NAME));
+    refresh_enabled=info->enabledExtensionCount==2;
+    if(refresh_enabled)ensure(advertises_refresh && !strcmp(info->enabledExtensionNames[1],XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME));
     *out=reinterpret_cast<XrInstance>(1);return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrGetInstanceProperties(XrInstance,XrInstanceProperties* p){strcpy(p->runtimeName,"Windowless test runtime");return XR_SUCCESS;}
 XRAPI_ATTR XrResult XRAPI_CALL xrGetSystem(XrInstance,const XrSystemGetInfo*,XrSystemId* p){*p=1;return XR_SUCCESS;}
 XRAPI_ATTR XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance,const char* name,PFN_xrVoidFunction* p){
-    ensure(!strcmp(name,"xrGetD3D11GraphicsRequirementsKHR"));*p=reinterpret_cast<PFN_xrVoidFunction>(requirements);return XR_SUCCESS;
+    if(!strcmp(name,"xrGetD3D11GraphicsRequirementsKHR"))*p=reinterpret_cast<PFN_xrVoidFunction>(requirements);
+    else if(!strcmp(name,"xrEnumerateDisplayRefreshRatesFB"))*p=reinterpret_cast<PFN_xrVoidFunction>(refresh_choices);
+    else if(!strcmp(name,"xrRequestDisplayRefreshRateFB"))*p=reinterpret_cast<PFN_xrVoidFunction>(request_rate);
+    else return XR_ERROR_FUNCTION_UNSUPPORTED;
+    return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrEnumerateEnvironmentBlendModes(XrInstance,XrSystemId,XrViewConfigurationType,uint32_t n,uint32_t* c,XrEnvironmentBlendMode* p){return one(XR_ENVIRONMENT_BLEND_MODE_OPAQUE,n,c,p);}
 XRAPI_ATTR XrResult XRAPI_CALL xrCreateSession(XrInstance,const XrSessionCreateInfo* info,XrSession* out){
@@ -123,3 +143,8 @@ XRAPI_ATTR XrResult XRAPI_CALL xrDestroyInstance(XrInstance){return XR_SUCCESS;}
 }
 void verify_test_runtime(){ensure(!session_running && submissions==4 && recenter_count==2 && !waited && !begun);}
 ID3D11Texture2D* test_hud_texture(){return chains[2].color.Get();}
+void reset_test_runtime(bool refresh){
+    ensure(!session_running && !gpu);chains={};chain_count=events=frame=submissions=recenter_count=0;
+    waited=begun=refresh_enabled=false;requested_rate=0;advertises_refresh=refresh;
+}
+float test_refresh_request(){return requested_rate;}

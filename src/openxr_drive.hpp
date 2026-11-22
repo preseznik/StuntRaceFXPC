@@ -20,20 +20,37 @@ struct Display {
 // Accumulate integer nanoseconds at the playable game's existing phase rate.
 class RaceClock {
     int64_t last{},fraction{};
+    unsigned rate;
 public:
+    explicit RaceClock(unsigned ticks_per_second=14):rate(ticks_per_second){}
     unsigned advance(int64_t predicted,bool driving) {
         const auto elapsed=last?predicted-last:0;
         last=driving?predicted:0;
         if(!driving || elapsed<0 || elapsed>250000000){fraction=0;return 0;}
-        fraction+=elapsed*14;
+        fraction+=elapsed*rate;
         const unsigned phases=unsigned(fraction/1000000000);
         fraction%=1000000000;
         return phases;
     }
 };
+// The native driver executes paired vehicle callbacks in actor order. Display
+// the first callback on the half-phase and the second on the original boundary.
+class BonnetMotionClock {
+    RaceClock clock{28};
+    bool halfway{};
+public:
+    bool advance(int64_t predicted,bool driving,const auto& step) {
+        const auto count=clock.advance(predicted,driving);
+        for(unsigned n=0;n<count;++n){
+            if(!halfway)step();
+            halfway=!halfway;
+        }
+        return halfway;
+    }
+};
 class Drive {
 public:
-    explicit Drive(std::ostream& diagnostics);
+    explicit Drive(std::ostream& diagnostics,unsigned preferred_hz=0,unsigned eye_scale_percent=100);
     ~Drive();
     ID3D11Device* device() const;
     using Update=std::function<Display(int64_t predicted,bool focused)>;

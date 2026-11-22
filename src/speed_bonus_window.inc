@@ -151,7 +151,7 @@ static std::optional<BonusFinish> play_speed_bonus(const Rom& rom,const Champion
     RECT rect{};
     state.hud=CreateWindowExW(0,L"STATIC",L"  Paused     P resume     Esc retire",WS_CHILD|SS_LEFT,8,8,width-16,24,scope.window,nullptr,GetModuleHandleW(nullptr),nullptr);
     SendMessageW(state.hud,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
-    Renderer renderer(scope.window);
+    Renderer renderer(scope.window,nullptr,desktop_fps);
     renderer.load_textures(extract_vehicle_sprites(rom,CourseId::easy_ride,false,true));
     renderer.load_backdrop(extract_speed_bonus_backdrop(rom));
     renderer.set_environment({});

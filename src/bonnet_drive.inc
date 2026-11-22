@@ -20,6 +20,14 @@ SceneEye bonnet_eye(const Renderer& renderer,const srf::vr::Eye& tracked) {
     for(auto& axis:offset)axis=renderer.normalized_distance(axis*units_per_meter);
     return {offset,tracked.orientation,tracked.left,tracked.right,tracked.down,tracked.up};
 }
+void load_bonnet_pose(Renderer& renderer,const srf::World& world,const srf::Rom& rom,
+                      const srf::NativeRace& race,const srf::CourseScenery& scenery,const std::array<srf::Vehicle,4>& cars) {
+    // Keep the 4WD's exterior eye billboards clear of the bonnet mount.
+    const auto poses=vehicle_poses(rom,cars,cars,race.player_index(),1,false);
+    const auto heading=cars[race.player_index()].body.word(0x24);
+    bonnet_camera(renderer,poses[race.player_index()],lerp_angle(heading,heading,1));
+    renderer.load_race_world(world,poses,rom,race,scenery);
+}
 srf::vr::Display bonnet_instruments(const srf::NativeRace& race,bool paused) {
     const auto& body=race.racers()[race.player_index()].body;
     std::wostringstream top,bottom;
@@ -43,8 +51,11 @@ void run_bonnet_drive(HWND window,srf::vr::Drive& drive,Renderer& renderer,const
     std::unique_ptr<srf::Gamepad> gamepad;
     try{gamepad=std::make_unique<srf::Gamepad>(profile);}catch(const std::exception& e){log<<"Controller: "<<e.what()<<std::endl;}
     std::map<ID3D11Texture2D*,SceneTarget> targets;
-    srf::vr::RaceClock clock;
+    srf::vr::BonnetMotionClock clock;
+    auto midpoint=race.racers();
+    bool show_midpoint=false;
     uint64_t uploaded=UINT64_MAX;
+    uint64_t scene_updates=0;
     bool muted=false,finished=false;
     drive.run([&]{
         MSG msg{};
@@ -59,31 +70,36 @@ void run_bonnet_drive(HWND window,srf::vr::Drive& drive,Renderer& renderer,const
         if(pad.disconnected)controls.paused=true;
         if(focused && (controls.restart || pad.restart)){
             log<<"Restart at phase "<<race.phase()<<std::endl;
-            reset();clock={};uploaded=UINT64_MAX;controls.paused=false;finished=false;
+            reset();clock={};midpoint=race.racers();uploaded=UINT64_MAX;controls.paused=false;finished=false;
         }
         controls.restart=false;
         const bool driving=focused && !controls.paused;
         if(audio && muted==driving){muted=!driving;audio->pause(muted);}
         const auto input=srf::combine_player_input(focused?keyboard_control(window):0,pad);
-        const auto phases=clock.advance(predicted,driving);
-        for(unsigned i=0;i<phases;++i)step(input.requested,input.steering_q15);
-        if(!finished && race.completion().finished){log<<"Finished three laps at phase "<<race.phase()<<std::endl;finished=true;}
+        show_midpoint=clock.advance(predicted,driving,[&]{
+            step(input.requested,input.steering_q15,std::nullopt,&midpoint);
+        }) && !race.ended();
+        if(!finished && race.completion().finished){
+            log<<"Finished three laps at phase "<<race.phase()<<'\n'
+               <<"Result: "<<unsigned(race.completion().acknowledged_laps)<<" laps, place "<<race.standings()[race.player_index()]
+               <<", "<<race.remaining_seconds()<<" seconds left"<<std::endl;
+            finished=true;
+        }
         auto hud=bonnet_instruments(race,controls.paused);
         hud.recenter=focused && (controls.recenter || pad.recenter);controls.recenter=false;
         return hud;
     },[&](ID3D11Texture2D* texture,DXGI_FORMAT format,const srf::vr::Eye& eye){
-        if(uploaded!=race.phase()){
-            const auto& cars=race.racers();
-            // The 4WD's exterior cartoon eyes are flat billboards beside this mount.
-            const auto poses=vehicle_poses(rom,cars,cars,race.player_index(),1,false);
-            const auto heading=cars[race.player_index()].body.word(0x24);
-            bonnet_camera(renderer,poses[race.player_index()],lerp_angle(heading,heading,1));
-            renderer.set_environment(environment.presentation());renderer.load_race_world(world,poses,rom,race,scenery);
-            uploaded=race.phase();
+        const uint64_t pose_id=2*race.phase()-unsigned(show_midpoint);
+        if(uploaded!=pose_id){
+            const auto& cars=show_midpoint?midpoint:race.racers();
+            renderer.set_environment(environment.presentation());
+            load_bonnet_pose(renderer,world,rom,race,scenery,cars);
+            uploaded=pose_id;++scene_updates;
         }
         auto [it,inserted]=targets.try_emplace(texture);
         if(inserted){D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);it->second=renderer.make_target(d.Width,d.Height,texture,format);}
         renderer.render_eye(it->second,bonnet_eye(renderer,eye));
     });
+    log<<"Native scene updates "<<scene_updates<<" (paired vehicle callbacks, up to 28 poses/s)"<<std::endl;
 }
 }

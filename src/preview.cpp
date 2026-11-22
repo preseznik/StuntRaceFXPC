@@ -6,6 +6,7 @@
 #include "srf/audio_device.hpp"
 #include "srf/gamepad.hpp"
 #include "openxr_drive.hpp"
+#include "desktop_frame_limit.hpp"
 #include "srf/game_frontend.hpp"
 #include "srf/speed_bonus.hpp"
 #include "srf/presentation.hpp"
@@ -118,6 +119,7 @@ struct Controls {
     bool race=false,restart=false,paused=false,recenter=false;
 };
 Controls controls;
+unsigned desktop_fps=0;
 HWND race_hud=nullptr;
 bool race_hud_visible=true,grid_instruments=false;
 HBRUSH hud_background=nullptr;
@@ -203,6 +205,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM key, LPARAM data)
 }
 
 class Renderer {
+    DesktopFrameLimit frame_limit;
+    void present() {
+        if(!swapchain)return;
+        check(swapchain->Present(frame_limit.capped()?0:1,0),"Present");
+        frame_limit.wait();
+    }
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain> swapchain;
@@ -263,7 +271,7 @@ class Renderer {
         surface_vertex_count=std::min(surface_count,vertex_count);
     }
 public:
-    Renderer(HWND window,ID3D11Device* headset_device=nullptr) {
+    Renderer(HWND window,ID3D11Device* headset_device=nullptr,unsigned fps=0):frame_limit(fps) {
         headset_output=headset_device!=nullptr;
         D3D_FEATURE_LEVEL level;
         const D3D_FEATURE_LEVEL requested[]{D3D_FEATURE_LEVEL_11_0};
@@ -898,7 +906,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
     void render(std::span<const std::uint32_t> demo_frame={}) {
         render_scene(desktop,nullptr,demo_frame);
         if(!demo_frame.empty())render_course_map(demo_frame,true);
-        else if(swapchain)check(swapchain->Present(1,0),"Present");
+        else present();
     }
     void render_eye(const SceneTarget& target,const SceneEye& eye) {
         render_scene(target,&eye,{});
@@ -1084,7 +1092,7 @@ float4 main(float4 position : SV_Position,float2 uv : TEXCOORD) : SV_Target {
         if(over_scene)context->OMSetBlendState(nullptr,nullptr,UINT_MAX);
         ID3D11ShaderResourceView* unbind=nullptr;
         context->PSSetShaderResources(0,1,&unbind);
-        if(swapchain)check(swapchain->Present(1,0),"Course map present");
+        present();
     }
     std::vector<BYTE> readback_bgra() {
         return readback_bgra(desktop);
@@ -1438,6 +1446,7 @@ int wmain(int argc,wchar_t** argv) {
         unsigned descriptor=0;
         unsigned steps=0,fixed_control=0;
         double simulation_hz=14;
+        unsigned vr_refresh=0,vr_scale=100;
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
             if(arg==L"--assets" && i+1<argc) assets=argv[++i];
@@ -1465,6 +1474,15 @@ int wmain(int argc,wchar_t** argv) {
             else if(arg==L"--steps" && i+1<argc) steps=std::stoul(argv[++i]);
             else if(arg==L"--control" && i+1<argc) fixed_control=std::stoul(argv[++i],nullptr,0);
             else if(arg==L"--simulation-hz" && i+1<argc) simulation_hz=std::stod(argv[++i]);
+            else if((arg==L"--desktop-fps" || arg==L"--vr-hz" || arg==L"--vr-scale") && i+1<argc){
+                const std::wstring value=argv[++i];
+                if(value.empty() || value.size()>3 || value.find_first_not_of(L"0123456789")!=std::wstring::npos)
+                    throw std::runtime_error("Frame rate and eye scale require an integer.");
+                const unsigned n=std::stoul(value);
+                if(arg==L"--vr-scale")vr_scale=n;
+                else if(arg==L"--vr-hz")vr_refresh=n;
+                else desktop_fps=n;
+            }
             else if(arg==L"--restart-check") restart_check=true;
             else if(arg==L"--replay-input" && i+1<argc) input_path=argv[++i];
             else if(arg==L"--controller-config" && i+1<argc) controller_path=argv[++i];
@@ -1478,8 +1496,11 @@ int wmain(int argc,wchar_t** argv) {
             else if(arg==L"--validate-assets") validate=true;
             else throw std::runtime_error("Usage: srf_preview --assets <models.srfmesh> [--world <world.srfworld>] [--game | --race] [--rom <original.sfc> --course easy-ride|aqua-tunnel|sunset-valley|night-owl|kings-forest|sea-breeze|white-land|night-cruise|lake-side|big-ravine|sky-ramp|harbor-city --car 4wd|coupe|f-type] [--borderless] [--validate-assets | --screenshot <new.png>] [--steps count --control native_word --trace new.jsonl] [--replay-input controls.csv --restart-check] [--simulation-hz 14] [--controller-config path] [--model index --descriptor address --yaw radians --pitch radians --zoom factor --width pixels --height pixels]");
         }
-        if(vr && (launch_game || !controls.race || course!=srf::CourseId::easy_ride || player_car!=srf::PlayerCar::four_wd || !screenshot.empty() || validate || steps || restart_check || !input_path.empty() || !trace_path.empty() || fixed_control))
+        if(vr && (launch_game || !controls.race || course!=srf::CourseId::easy_ride || player_car!=srf::PlayerCar::four_wd || !screenshot.empty() || validate || steps || restart_check || !trace_path.empty() || fixed_control))
             throw std::runtime_error("Easy Ride VR requires an interactive 4WD race.");
+        if((desktop_fps && (desktop_fps<30 || desktop_fps>240)) || (vr_refresh && (vr_refresh<60 || vr_refresh>240)) ||
+           vr_scale<50 || vr_scale>100 || (!vr && (vr_refresh || vr_scale!=100)) || (vr && desktop_fps))
+            throw std::runtime_error("Invalid frame settings for the selected display mode.");
         if(simulation_hz!=14)
             throw std::runtime_error("This build supports 14 simulation phases/s. Changing callback frequency speeds up the game; faithful 120 Hz integration is not yet implemented.");
         if(!std::isfinite(simulation_hz) || simulation_hz<1 || simulation_hz>120 || steps>1000000 || fixed_control>65535 ||
@@ -1673,7 +1694,8 @@ int wmain(int argc,wchar_t** argv) {
             }
         };
         const auto step_race=[&](std::uint16_t input,std::optional<std::int16_t> steering=std::nullopt,
-                                 std::optional<std::uint8_t> locked_grid_ticks=std::nullopt) {
+                                 std::optional<std::uint8_t> locked_grid_ticks=std::nullopt,
+                                 std::array<srf::Vehicle,4>* halfway=nullptr) {
             bool map_wishes=recorded.empty() && screenshot.empty();
             auto ticks=locked_grid_ticks.value_or(0);
             if(!locked_grid_ticks) {
@@ -1696,7 +1718,7 @@ int wmain(int argc,wchar_t** argv) {
             if(map_wishes)
                 input=srf::prepare_player_input(race_audio_state,player_before,input,race->countdown_active(),input_events);
             else input=srf::filter_player_boost(player_before,input);
-            previous=race->racers(); race->step(input,locked_grid_ticks?0:ticks,steering);
+            previous=race->racers(); race->step(input,locked_grid_ticks?0:ticks,steering,halfway);
             if(championship && race->completion().acknowledged_laps>previous_lap && previous_lap<lap_times.size()) {
                 const auto elapsed=race->elapsed_centiseconds();
                 lap_times[previous_lap]=elapsed-last_lap_end;
@@ -1782,7 +1804,7 @@ int wmain(int argc,wchar_t** argv) {
             ShowWindow(window,SW_SHOW);
             std::ofstream diagnostics(L"openxr-last-drive.log");
             try {
-                srf::vr::Drive drive(diagnostics);
+                srf::vr::Drive drive(diagnostics,vr_refresh,vr_scale);
                 Renderer renderer(nullptr,drive.device());
                 renderer.set_course_colors(course_package); renderer.load_textures(sprites,dusk_sprites);
                 renderer.load_world(world,0);
@@ -1792,13 +1814,14 @@ int wmain(int argc,wchar_t** argv) {
                 run_bonnet_drive(window,drive,renderer,*race_rom,*race,*scenery,*environment,world,controller_path,
                     audio,step_race,[&]{
                         race->reset();previous=race->racers();countdown_clock=0;race_audio_state={};
+                        input_index=0;
                         scenery->reset();environment->reset();phase_video_ticks=environment_video_ticks=0;
                         if(audio){audio->restart();audio->update({},false,false,true,false);}
                     },diagnostics);
             } catch(const std::exception& e){diagnostics<<e.what()<<std::endl;throw;}
             if(IsWindow(window))DestroyWindow(window);CoUninitialize();return 0;
         }
-        Renderer renderer(window);
+        Renderer renderer(window,nullptr,(window && race)?desktop_fps:0);
         renderer.set_course_colors(course_package);
         renderer.load_textures(sprites,dusk_sprites);
         if(race)renderer.load_backdrop(srf::extract_course_backdrop(*race_rom,course));

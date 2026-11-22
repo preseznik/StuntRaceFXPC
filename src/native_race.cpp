@@ -457,7 +457,8 @@ void NativeRace::acknowledge_lap() {
 }
 
 void NativeRace::step(std::uint16_t controls,std::uint8_t elapsed_clock_ticks,
-                      std::optional<std::int16_t> steering) {
+                      std::optional<std::int16_t> steering,std::array<Vehicle,4>* halfway) {
+    if(halfway)*halfway=racers_;
     if(ended())return;
     const bool held=countdown_active();
     if(!held)advance_race_clock(clock_,clock_tuning_,elapsed_clock_ticks);
@@ -544,6 +545,9 @@ void NativeRace::step(std::uint16_t controls,std::uint8_t elapsed_clock_ticks,
         if(racers_[i].body.word(0x1c)&8) {
             drive_.damage_mode=0;
             update_vehicle(racers_[i],tuning_[i],wheel_tuning_[i],opponents_,drive_,environment);
+            // Preserve the original callback order across vehicles. A single-pass
+            // actor keeps its starting pose until the full phase is complete.
+            if(halfway)(*halfway)[i]=racers_[i];
         }
         drive_.damage_mode=1;
         update_vehicle(racers_[i],tuning_[i],wheel_tuning_[i],opponents_,drive_,environment);

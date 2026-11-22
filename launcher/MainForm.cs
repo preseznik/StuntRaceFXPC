@@ -4,11 +4,23 @@ namespace StuntRaceFX.Launcher;
 
 internal sealed record LauncherSettings(string RomPath = "", string OutputPath = "",
     string Car = "4wd", string Resolution = "1920 x 1080", bool Borderless = false,
-    string Course = GameContent.DefaultCourse, bool QuickRace = false, bool EasyRideVr = false);
+    string Course = GameContent.DefaultCourse, bool QuickRace = false, bool EasyRideVr = false,
+    int DesktopFps = 0, int VrRefresh = 0, int VrScale = 100);
 
 internal sealed class MainForm : Form
 {
     private sealed record CarChoice(string Id, string Name) { public override string ToString() => Name; }
+    private sealed record NumberChoice(int Value, string Label) { public override string ToString() => Label; }
+    private static ComboBox Choices(string name, string label, string unit, string automatic, params int[] values)
+    {
+        var box = new ComboBox { Name = name, AccessibleName = label, DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
+        foreach (var number in values) box.Items.Add(new NumberChoice(number, number == 0 ? automatic : $"{number}{unit}"));
+        box.SelectedIndex = 0;
+        return box;
+    }
+    private static int SelectedNumber(ComboBox box) => ((NumberChoice)box.SelectedItem!).Value;
+    private static void RestoreNumber(ComboBox box, int value) =>
+        box.SelectedItem = box.Items.Cast<NumberChoice>().FirstOrDefault(choice => choice.Value == value) ?? box.Items[0];
     private readonly TextBox rom = new() { Dock = DockStyle.Fill, AccessibleName = "Game ROM" };
     private readonly TextBox output = new() { Dock = DockStyle.Fill, AccessibleName = "Build folder" };
     private readonly TextBox log = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Font = new Font("Consolas", 9) };
@@ -23,6 +35,9 @@ internal sealed class MainForm : Form
     private readonly ComboBox course = new() { Name = "Course", DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top, AccessibleName = "Course" };
     private readonly ComboBox resolution = new() { Name = "Resolution", DropDownStyle = ComboBoxStyle.DropDownList, Width = 210, AccessibleName = "Window resolution" };
     private readonly ComboBox windowMode = new() { Name = "WindowMode", DropDownStyle = ComboBoxStyle.DropDownList, Width = 210, AccessibleName = "Window mode" };
+    private readonly ComboBox desktopFps = Choices("DesktopFps", "Desktop driving frame limit", " FPS", "Display sync", 0, 30, 60, 90, 120, 144);
+    private readonly ComboBox vrRefresh = Choices("VrRefresh", "Preferred headset refresh", " Hz", "Runtime default", 0, 72, 80, 90, 120, 144);
+    private readonly ComboBox vrScale = Choices("VrScale", "VR eye resolution", "%", "", 100, 85, 75, 60);
     private readonly Button cancel = new() { Text = "Cancel build", AutoSize = true, Enabled = false };
     private readonly Label status = new() { Text = "Select your ROM in Game files to begin.", AutoSize = true, Dock = DockStyle.Fill };
     private readonly Label session = new() { AutoSize = true, Dock = DockStyle.Top, Margin = new Padding(0, 16, 0, 0) };
@@ -84,11 +99,23 @@ internal sealed class MainForm : Form
         selection.Controls.Add(session); selection.Controls.Add(availability);
         raceLayout.Controls.Add(coursePanel, 0, 0); raceLayout.Controls.Add(selection, 1, 0); racePage.Controls.Add(raceLayout);
 
-        var graphics = Stack(); Page("Graphics").Controls.Add(graphics);
+        var displayColumns = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        displayColumns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        displayColumns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        var graphics = Stack(); var headset = Stack();
+        displayColumns.Controls.Add(graphics, 0, 0); displayColumns.Controls.Add(headset, 1, 0);
+        Page("Graphics").Controls.Add(displayColumns);
         graphics.Controls.Add(Heading("Display")); graphics.Controls.Add(Hint("Window mode")); graphics.Controls.Add(windowMode);
         graphics.Controls.Add(Hint("Window resolution", 6, 18)); graphics.Controls.Add(resolution);
-        graphics.Controls.Add(Hint("Borderless uses your monitor's desktop resolution. F11 switches window mode during a race.", 14, 18));
-        graphics.Controls.Add(Hint("Rendering follows the display's refresh rate. Changing resolution does not change race speed."));
+        graphics.Controls.Add(Hint("Desktop driving frame limit")); graphics.Controls.Add(desktopFps);
+        graphics.Controls.Add(Hint("F11 switches window mode during a race.", 10, 10));
+        headset.Controls.Add(Heading("Easy Ride VR"));
+        headset.Controls.Add(Hint("Preferred headset refresh")); headset.Controls.Add(vrRefresh);
+        headset.Controls.Add(Hint("Eye resolution", 6, 18)); headset.Controls.Add(vrScale);
+        headset.Controls.Add(Hint("Lower eye resolution reduces GPU work. The HUD stays at full resolution.", 6, 10));
+        headset.Controls.Add(Hint("The runtime keeps its current refresh if the requested rate is unavailable."));
+        foreach (var label in headset.Controls.OfType<Label>().Concat(graphics.Controls.OfType<Label>()))
+            label.MaximumSize = new Size(295, 0);
         windowMode.SelectedIndexChanged += (_, _) => { resolution.Enabled = active == null && windowMode.SelectedIndex == 0; RefreshLaunch(); };
         var controls = Stack(); Page("Controls").Controls.Add(controls);
         controls.Controls.Add(Heading("Controller"));
@@ -155,7 +182,8 @@ internal sealed class MainForm : Form
             SaveSettings();
             var dimensions = resolution.Text.Split('x', StringSplitOptions.TrimEntries);
             using var process = BuildPipeline.Launch(output.Text, width: int.Parse(dimensions[0]), height: int.Parse(dimensions[1]),
-                car: CarId, borderless: windowMode.SelectedIndex == 1, course: CourseId, game: !QuickRaceSelected && !VrSelected, vr: VrSelected);
+                car: CarId, borderless: windowMode.SelectedIndex == 1, course: CourseId, game: !QuickRaceSelected && !VrSelected, vr: VrSelected,
+                desktopFps: SelectedNumber(desktopFps), vrRefresh: SelectedNumber(vrRefresh), vrScale: SelectedNumber(vrScale));
             status.Text = VrSelected ? "Easy Ride launched in OpenXR." : QuickRaceSelected ? $"Quick Race launched — {course.Text}, {car.Text}." : "Game launched.";
             AppendLog(status.Text);
         }
@@ -227,6 +255,7 @@ internal sealed class MainForm : Form
             launchMode.SelectedIndex = settings.EasyRideVr ? 2 : settings.QuickRace ? 1 : 0;
             if (resolution.Items.Contains(settings.Resolution)) resolution.SelectedItem = settings.Resolution;
             windowMode.SelectedIndex = settings.Borderless ? 1 : 0;
+            RestoreNumber(desktopFps, settings.DesktopFps); RestoreNumber(vrRefresh, settings.VrRefresh); RestoreNumber(vrScale, settings.VrScale);
         }
         catch (Exception error) when (error is IOException or JsonException or UnauthorizedAccessException)
         { AppendLog("Could not load settings: " + error.Message); }
@@ -234,7 +263,8 @@ internal sealed class MainForm : Form
 
     private void SaveSettings()
     {
-        try { BuildPipeline.AtomicWrite(settingsFile, JsonSerializer.Serialize(new LauncherSettings(rom.Text, output.Text, CarId, resolution.Text, windowMode.SelectedIndex == 1, CourseId, QuickRaceSelected, VrSelected), BuildPipeline.JsonOptions)); }
+        try { BuildPipeline.AtomicWrite(settingsFile, JsonSerializer.Serialize(new LauncherSettings(rom.Text, output.Text, CarId, resolution.Text, windowMode.SelectedIndex == 1, CourseId, QuickRaceSelected, VrSelected,
+            SelectedNumber(desktopFps), SelectedNumber(vrRefresh), SelectedNumber(vrScale)), BuildPipeline.JsonOptions)); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         { AppendLog("Could not save portable settings: " + error.Message); }
     }

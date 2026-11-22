@@ -9,7 +9,7 @@ internal static class GameContent
 {
     internal const string DefaultCourse = "easy-ride";
     internal const int OriginalBootVersion = 22;
-    internal const int CurrentVersion = 28;
+    internal const int CurrentVersion = 29;
     internal static readonly GameCourse[] Courses = [
         new("easy-ride", "Easy Ride", 1637, 0),
         new("aqua-tunnel", "Aqua Tunnel", 2206, 2),

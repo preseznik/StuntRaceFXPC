@@ -23,7 +23,7 @@ StuntExit play_stunt_course(const srf::Rom& rom,srf::GameSessionChoice& selectio
     window.open(L"StuntRaceFXRockField",(window_title+L"Trailer").c_str(),boot_window_proc,&keys,width,height,borderless);
     generated::CoursePackage colors{};
     colors.day_palette=colors.dusk_palette=extract_rock_field_palette(rom,course);
-    Renderer renderer(window.window);
+    Renderer renderer(window.window,nullptr,desktop_fps);
     renderer.set_course_colors(colors);
     renderer.load_textures(extract_rock_field_sprites(rom,course));
     renderer.load_backdrop(extract_rock_field_backdrop(rom,course));

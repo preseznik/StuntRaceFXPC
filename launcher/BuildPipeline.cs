@@ -280,8 +280,16 @@ internal sealed class BuildPipeline(string source, Action<string> report)
         return game ? "--game" : "--race";
     }
 
+    internal static string[] FrameArguments(int version, bool vr, int desktopFps, int vrRefresh, int vrScale)
+    {
+        if ((vr && vrRefresh == 0 && vrScale == 100) || (!vr && desktopFps == 0)) return [];
+        if (version < 29) throw new InvalidOperationException("Rebuild from Game files to use custom frame settings.");
+        return vr ? ["--vr-hz", vrRefresh.ToString(), "--vr-scale", vrScale.ToString()] : ["--desktop-fps", desktopFps.ToString()];
+    }
+
     public static Process Launch(string output, bool inspectModels = false, int width = 1280, int height = 720,
-        string car = "4wd", bool borderless = false, string course = GameContent.DefaultCourse, bool game = false, bool vr = false)
+        string car = "4wd", bool borderless = false, string course = GameContent.DefaultCourse, bool game = false, bool vr = false,
+        int desktopFps = 0, int vrRefresh = 0, int vrScale = 100)
     {
         var record = LastSuccess(output) ?? throw new InvalidOperationException("Build the game from Game files first.");
         var stage = Path.Combine(Path.GetFullPath(output), "builds", record.Directory);
@@ -296,6 +304,7 @@ internal sealed class BuildPipeline(string source, Action<string> report)
         {
             if (vr && (game || record.ContentVersion < 28)) throw new InvalidOperationException("Rebuild for Easy Ride VR.");
             if (vr) info.ArgumentList.Add("--vr");
+            foreach (var arg in FrameArguments(record.ContentVersion, vr, desktopFps, vrRefresh, vrScale)) info.ArgumentList.Add(arg);
             if (game || vr)
             {
                 course = GameContent.DefaultCourse;

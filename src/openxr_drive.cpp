@@ -95,6 +95,40 @@ struct Images {
         require(xrReleaseSwapchainImage(chain,&r),"Releasing headset image");
     }
 };
+// Sample the two eye draws on the GPU timeline. Poll completed queries on
+// later frames, without flushing the command queue or blocking the headset.
+struct GpuFrameTime {
+    ComPtr<ID3D11Query> disjoint,start,finish;
+    bool pending{};
+    uint64_t samples{};
+    double total_ms{},worst_ms{};
+    void initialize(ID3D11Device* device){
+        D3D11_QUERY_DESC desc{D3D11_QUERY_TIMESTAMP,0};
+        if(FAILED(device->CreateQuery(&desc,&start)) || FAILED(device->CreateQuery(&desc,&finish)))return;
+        desc.Query=D3D11_QUERY_TIMESTAMP_DISJOINT;
+        device->CreateQuery(&desc,&disjoint);
+    }
+    bool begin(ID3D11DeviceContext* ctx,uint64_t frame){
+        if(!disjoint)return false;
+        if(pending){
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT result{};
+            uint64_t a{},b{};
+            constexpr UINT flags=D3D11_ASYNC_GETDATA_DONOTFLUSH;
+            if(ctx->GetData(disjoint.Get(),&result,sizeof(result),flags)!=S_OK ||
+               ctx->GetData(start.Get(),&a,sizeof(a),flags)!=S_OK || ctx->GetData(finish.Get(),&b,sizeof(b),flags)!=S_OK)return false;
+            pending=false;
+            if(!result.Disjoint && result.Frequency && b>=a){
+                const double ms=1000.*double(b-a)/result.Frequency;
+                ++samples;total_ms+=ms;worst_ms=std::max(worst_ms,ms);
+            }
+        }
+        if(frame%16!=0)return false;
+        ctx->Begin(disjoint.Get());ctx->End(start.Get());return true;
+    }
+    void end(ID3D11DeviceContext* ctx){
+        ctx->End(finish.Get());ctx->End(disjoint.Get());pending=true;
+    }
+};
 }
 struct Drive::Impl {
     std::ostream& log;
@@ -109,9 +143,15 @@ struct Drive::Impl {
     bool running=false,quit=false,recenter=true,have_hud=false;
     XrTime space_change{};
     uint64_t frames{},projections{},recenters{},missed_periods{};
+    GpuFrameTime gpu_time;
+    std::chrono::steady_clock::time_point last_submission{};
+    double submission_seconds{};
+    uint64_t submission_intervals{};
     uint64_t draw_ns{},long_draws{},peak_draw_ns{};
     XrTime last_time{};XrDuration period{};
-    explicit Impl(std::ostream& stream):log(stream){}
+    unsigned preferred_hz{},eye_scale_percent{};
+    bool refresh_extension{};
+    Impl(std::ostream& stream,unsigned hz,unsigned scale):log(stream),preferred_hz(hz),eye_scale_percent(scale){}
     ~Impl(){
         if(context)context->ClearState();
         for(auto* item:{&hud,&eyes[1],&eyes[0]})if(item->chain)xrDestroySwapchain(item->chain);
@@ -122,17 +162,28 @@ struct Drive::Impl {
            <<", skipped predicted display periods "<<missed_periods<<std::endl;
         if(projections)log<<"App work before submission (includes image waits): mean "<<draw_ns/1e6/projections
             <<" ms, worst "<<peak_draw_ns/1e6<<" ms, over predicted period "<<long_draws<<std::endl;
+        if(gpu_time.samples)log<<"Stereo GPU time ("<<gpu_time.samples<<" samples): mean "<<gpu_time.total_ms/gpu_time.samples
+            <<" ms, worst "<<gpu_time.worst_ms<<" ms"<<std::endl;
+        if(submission_seconds>0)log<<"Focused stereo submissions per wall-clock second "<<submission_intervals/submission_seconds<<std::endl;
     }
     XrSpace space(XrReferenceSpaceType type,XrPosef pose) {
         XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO,nullptr,type,pose};XrSpace result{};
         require(xrCreateReferenceSpace(session,&info,&result),"Creating seated reference space");return result;
     }
     void initialize() {
-        const char* extensions[]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+        if(eye_scale_percent<50 || eye_scale_percent>100 || preferred_hz>240)
+            throw std::invalid_argument("Invalid headset refresh rate or eye resolution");
+        const char* extensions[]={XR_KHR_D3D11_ENABLE_EXTENSION_NAME,XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME};
+        if(preferred_hz){
+            auto supported=enumerate(XrExtensionProperties{XR_TYPE_EXTENSION_PROPERTIES},[](auto n,auto* c,XrExtensionProperties* p){
+                return xrEnumerateInstanceExtensionProperties(nullptr,n,c,p);},"Reading OpenXR extensions");
+            refresh_extension=std::ranges::any_of(supported,[&](const auto& p){return !std::strcmp(p.extensionName,extensions[1]);});
+            if(!refresh_extension)log<<"Runtime controls refresh; display refresh rate extension unavailable (requested "<<preferred_hz<<" Hz)"<<std::endl;
+        }
         XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
         std::strcpy(ci.applicationInfo.applicationName,"Stunt Race FX PC");
         ci.applicationInfo.apiVersion=XR_MAKE_VERSION(1,0,0);
-        ci.enabledExtensionCount=1;ci.enabledExtensionNames=extensions;
+        ci.enabledExtensionCount=refresh_extension?2:1;ci.enabledExtensionNames=extensions;
         require(xrCreateInstance(&ci,&instance),"Starting OpenXR. Connect the headset and enable a Windows D3D11 OpenXR runtime");
         XrInstanceProperties props{XR_TYPE_INSTANCE_PROPERTIES};
         require(xrGetInstanceProperties(instance,&props),"Reading runtime");log<<"Runtime "<<props.runtimeName<<std::endl;
@@ -155,6 +206,7 @@ struct Drive::Impl {
             if(SUCCEEDED(D3D11CreateDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,0,&level,1,D3D11_SDK_VERSION,&device,nullptr,&context)))break;
         }
         if(!device)throw std::runtime_error("Cannot create D3D11 device on the headset runtime's GPU");
+        gpu_time.initialize(device.Get());
         XrGraphicsBindingD3D11KHR bind{XR_TYPE_GRAPHICS_BINDING_D3D11_KHR,nullptr,device.Get()};
         XrSessionCreateInfo sc{XR_TYPE_SESSION_CREATE_INFO,&bind,0,system};require(xrCreateSession(instance,&sc,&session),"Opening headset session");
         local=space(XR_REFERENCE_SPACE_TYPE_LOCAL,identity);seat=space(XR_REFERENCE_SPACE_TYPE_LOCAL,identity);head=space(XR_REFERENCE_SPACE_TYPE_VIEW,identity);
@@ -165,10 +217,28 @@ struct Drive::Impl {
         for(auto f:{DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_B8G8R8A8_UNORM})
             if(std::find(formats.begin(),formats.end(),f)!=formats.end()){format=f;break;}
         if(!format)throw std::runtime_error("No supported headset color format");
-        for(int i=0;i<2;++i)eyes[i].create(session,config[i].recommendedImageRectWidth,config[i].recommendedImageRectHeight,format,false);
+        const auto scaled=[&](uint32_t size){return std::max(1u,(size*eye_scale_percent+50)/100);};
+        for(int i=0;i<2;++i)eyes[i].create(session,scaled(config[i].recommendedImageRectWidth),scaled(config[i].recommendedImageRectHeight),format,false);
         hud.create(session,hud_width,hud_height,format,true);
-        log<<"Eye targets "<<config[0].recommendedImageRectWidth<<'x'<<config[0].recommendedImageRectHeight
-           <<" and "<<config[1].recommendedImageRectWidth<<'x'<<config[1].recommendedImageRectHeight<<std::endl;
+        log<<"Eye targets "<<eyes[0].area.imageRect.extent.width<<'x'<<eyes[0].area.imageRect.extent.height
+           <<" and "<<eyes[1].area.imageRect.extent.width<<'x'<<eyes[1].area.imageRect.extent.height<<" at "<<eye_scale_percent<<"%"<<std::endl;
+    }
+    void request_refresh(){
+        PFN_xrEnumerateDisplayRefreshRatesFB list{};
+        PFN_xrRequestDisplayRefreshRateFB request{};
+        auto r=xrGetInstanceProcAddr(instance,"xrEnumerateDisplayRefreshRatesFB",reinterpret_cast<PFN_xrVoidFunction*>(&list));
+        if(XR_SUCCEEDED(r))r=xrGetInstanceProcAddr(instance,"xrRequestDisplayRefreshRateFB",reinterpret_cast<PFN_xrVoidFunction*>(&request));
+        uint32_t count{};
+        if(XR_SUCCEEDED(r))r=list(session,0,&count,nullptr);
+        std::vector<float> rates(count);
+        if(XR_SUCCEEDED(r) && count)r=list(session,count,&count,rates.data());
+        if(XR_SUCCEEDED(r)){
+            log<<"Runtime refresh choices (Hz):";for(auto rate:rates)log<<' '<<rate;log<<std::endl;
+            const auto choice=std::ranges::find_if(rates,[&](float hz){return std::abs(hz-preferred_hz)<.1f;});
+            if(choice==rates.end()){log<<"Requested "<<preferred_hz<<" Hz unavailable; using runtime rate"<<std::endl;return;}
+            r=request(session,*choice);
+        }
+        log<<"Display refresh request "<<preferred_hz<<" Hz, XR result "<<int(r)<<std::endl;
     }
     void events(){
         for(;;){
@@ -186,6 +256,7 @@ struct Drive::Impl {
             if(state==XR_SESSION_STATE_READY){
                 XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO,nullptr,stereo};
                 require(xrBeginSession(session,&begin),"Beginning stereo session");running=true;last_time=0;recenter=true;
+                if(refresh_extension)request_refresh();
             }else if(state==XR_SESSION_STATE_STOPPING){
                 require(xrEndSession(session),"Ending stereo session");running=false;
             }else if(state==XR_SESSION_STATE_EXITING || state==XR_SESSION_STATE_LOSS_PENDING)quit=true;
@@ -225,10 +296,12 @@ struct Drive::Impl {
             const XrCompositionLayerBaseHeader* layers[]={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
                                                          reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
             if(visible){
+                const bool timing=gpu_time.begin(context.Get(),projections);
                 for(int i=0;i<2;++i){
                     pv[i].pose=views[i].pose;pv[i].fov=views[i].fov;pv[i].subImage=eyes[i].area;
                     eyes[i].write([&](auto texture){draw(texture,format,scene_eye(views[i]));context->OMSetRenderTargets(0,nullptr,nullptr);});
                 }
+                if(timing)gpu_time.end(context.Get());
                 if(!have_hud || display.instruments!=last.instruments || display.message!=last.message){
                     auto pixels=bitmap.paint(display);
                     hud.write([&](auto texture){context->UpdateSubresource(texture,0,nullptr,pixels,hud_width*4,0);});
@@ -240,10 +313,17 @@ struct Drive::Impl {
             }
             // Layer structures must remain alive through xrEndFrame.
             auto result=xrEndFrame(session,&end);end.type=XR_TYPE_UNKNOWN;require(result,"Submitting stereo frame");
+            if(visible && state==XR_SESSION_STATE_FOCUSED){
+                const auto now=std::chrono::steady_clock::now();
+                if(last_submission!=std::chrono::steady_clock::time_point{}){
+                    submission_seconds+=std::chrono::duration<double>(now-last_submission).count();++submission_intervals;
+                }
+                last_submission=now;
+            }else last_submission={};
         }catch(...){if(end.type!=XR_TYPE_UNKNOWN){end.layerCount=0;end.layers=nullptr;xrEndFrame(session,&end);}throw;}
     }
 };
-Drive::Drive(std::ostream& log):impl(std::make_unique<Impl>(log)){impl->initialize();}
+Drive::Drive(std::ostream& log,unsigned hz,unsigned scale):impl(std::make_unique<Impl>(log,hz,scale)){impl->initialize();}
 Drive::~Drive()=default;
 ID3D11Device* Drive::device() const{return impl->device.Get();}
 void Drive::run(const std::function<bool()>& pump,const Update& update,const Draw& draw){
