@@ -302,8 +302,8 @@ internal static class CommandLine
                 style.SelectedItem = "N64 Mode";
                 if (display.Text != "1280 x 720") throw new InvalidOperationException("The legacy N64 profile did not migrate");
                 carChoice.SelectedIndex = 2;
-                if (style.Enabled || style.Text != "Original" || display.Text != "2560 x 1440")
-                    throw new InvalidOperationException("Unsupported car lost the Original Quick Race profile");
+                if (!style.Enabled || style.Text != "N64 Mode" || display.Text != "1280 x 720")
+                    throw new InvalidOperationException("F-TYPE lost the selected Quick Race profile");
                 carChoice.SelectedIndex = 0;
                 if (style.Text != "N64 Mode") throw new InvalidOperationException("Returning to 4WD lost its visual style");
                 freshMode.SelectedItem = "Normal";
@@ -385,6 +385,13 @@ internal static class CommandLine
                             style.SelectedItem = look;
                             if (!style.Enabled || launch.Enabled != (version >= GameContent.CoupeStyleVersion))
                                 throw new InvalidOperationException($"Wrong COUPE {look} availability for version {version}");
+                        }
+                        carChoice.SelectedIndex = 2;
+                        foreach (var look in new[] { "Remastered", "N64 Mode" })
+                        {
+                            style.SelectedItem = look;
+                            if (!style.Enabled || launch.Enabled != (version >= GameContent.FTypeStyleVersion))
+                                throw new InvalidOperationException($"Wrong F-TYPE {look} availability for version {version}");
                         }
                         carChoice.SelectedIndex = 0;
                         var lowRaster = (CheckBox)form.Controls.Find("N64LowRaster", true).Single();

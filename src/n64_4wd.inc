@@ -4,7 +4,11 @@ namespace n64 {
 using Vec = std::array<float,3>;
 struct Face { std::array<Vec,4> corners; Vec color; bool glass=false; };
 using Mesh = std::vector<Face>;
+constexpr unsigned f_type_player_shell=0xa200, f_type_rival_shell=0xa7e8;
 constexpr unsigned coupe_player_shell=0xa2a8, coupe_rival_shell=0xa804;
+bool original_player_shell(unsigned descriptor) {
+    return descriptor==coupe_player_shell || descriptor==f_type_player_shell;
+}
 float tire_radius(const RenderSprite& wheel) {return wheel.diameter*.43f;}
 
 Mesh rally_body() {
@@ -142,7 +146,7 @@ Mesh opponent_trim(unsigned descriptor) {
     const float rear=descriptor==0xa820?-150.f:-110.f;
     block({-13,13,rear-2},{13,23,132},rubber);
     for(float z:{rear,130.f})block({-84,13,z-3},{84,21,z+3},metal);
-    if(descriptor==0xa7e8) { // Single-seater rear wing, endplates and twin exhaust.
+    if(descriptor==f_type_rival_shell) { // Single-seater rear wing, endplates and twin exhaust.
         for(float side:{-1.f,1.f}) {
             float x=side*16;
             block({x-2,-62,-128},{x+2,-24,-124},metal);
@@ -170,21 +174,9 @@ Mesh opponent_trim(unsigned descriptor) {
     return mesh;
 }
 
-Mesh rally_cockpit(bool coupe=false) {
-    Mesh mesh=coupe?Mesh{}:rally_hood();
-    const Vec charcoal{.13f,.16f,.18f},vinyl{.28f,.32f,.32f},alloy{.58f,.60f,.56f};
+void append_instruments(Mesh& mesh) {
+    const Vec charcoal{.13f,.16f,.18f},alloy{.58f,.60f,.56f};
     auto quad=[&](Vec a,Vec b,Vec c,Vec d,Vec color){mesh.push_back({{a,b,c,d},color});};
-    quad({-73,-48,70},{73,-48,70},{70,-60,44},{-70,-60,44},vinyl);
-    quad({-70,-60,44},{70,-60,44},{73,-10,36},{-73,-10,36},vinyl);
-    quad({-73,-10,36},{73,-10,36},{73,19,-85},{-73,19,-85},charcoal);
-    for(float side:{-1.f,1.f}) {
-        quad({side*75,-48,70},{side*67,-48,70},{side*52,-105,36},{side*60,-105,36},vinyl);
-        quad({side*75,-48,70},{side*73,-39,70},{side*73,-39,-84},{side*75,-48,-84},charcoal);
-        quad({side*73,-39,70},{side*73,20,49},{side*73,20,-84},{side*73,-39,-84},vinyl);
-        quad({side*75,-48,-30},{side*75,-48,-36},{side*60,-105,-32},{side*60,-105,-26},vinyl);
-    }
-    quad({-60,-105,36},{60,-105,36},{60,-101,37},{-60,-101,37},charcoal);
-    quad({-60,-105,36},{60,-105,36},{60,-105,-88},{-60,-105,-88},{.38f,.38f,.34f});
     auto circle=[](Vec center,float radius,int step) {
         float a=step*6.2831853f/24;
         return Vec{center[0]+radius*std::cos(a),center[1]+radius*std::sin(a),center[2]};
@@ -206,6 +198,37 @@ Mesh rally_cockpit(bool coupe=false) {
     ring(hub,14,17,{.20f,.23f,.22f});
     for(int i:{0,8,16})quad(circle(hub,3,i-1),circle(hub,14,i-1),circle(hub,14,i),circle(hub,3,i),alloy);
     ring({hub[0],hub[1],hub[2]-.3f},0,4.5f,charcoal);
+}
+
+Mesh single_seat_dash() {
+    Mesh mesh;
+    append_instruments(mesh);
+    // A central driving position behind the scuttle at Z=50, Y=-44.
+    for(auto& face:mesh)for(auto& p:face.corners) {
+        p[0]=(p[0]+18.f)*.77f;
+        p[1]=(p[1]+52.f)*.82f-51.f;
+        p[2]+=10.f;
+    }
+    mesh.push_back({{Vec{-38,-59,55},Vec{38,-59,55},Vec{40,-27,58},Vec{-40,-27,58}},{.12f,.15f,.16f}});
+    return mesh;
+}
+
+Mesh rally_cockpit(bool coupe=false) {
+    Mesh mesh=coupe?Mesh{}:rally_hood();
+    const Vec charcoal{.13f,.16f,.18f},vinyl{.28f,.32f,.32f};
+    auto quad=[&](Vec a,Vec b,Vec c,Vec d,Vec color){mesh.push_back({{a,b,c,d},color});};
+    quad({-73,-48,70},{73,-48,70},{70,-60,44},{-70,-60,44},vinyl);
+    quad({-70,-60,44},{70,-60,44},{73,-10,36},{-73,-10,36},vinyl);
+    quad({-73,-10,36},{73,-10,36},{73,19,-85},{-73,19,-85},charcoal);
+    for(float side:{-1.f,1.f}) {
+        quad({side*75,-48,70},{side*67,-48,70},{side*52,-105,36},{side*60,-105,36},vinyl);
+        quad({side*75,-48,70},{side*73,-39,70},{side*73,-39,-84},{side*75,-48,-84},charcoal);
+        quad({side*73,-39,70},{side*73,20,49},{side*73,20,-84},{side*73,-39,-84},vinyl);
+        quad({side*75,-48,-30},{side*75,-48,-36},{side*60,-105,-32},{side*60,-105,-26},vinyl);
+    }
+    quad({-60,-105,36},{60,-105,36},{60,-101,37},{-60,-101,37},charcoal);
+    quad({-60,-105,36},{60,-105,36},{60,-105,-88},{-60,-105,-88},{.38f,.38f,.34f});
+    append_instruments(mesh);
     if(coupe) {
         // Fit the shared instruments to the Coupé's narrower cabin. The
         // windscreen runs from Z=0 at the roof to Z=40 at the scuttle.
@@ -251,12 +274,15 @@ void draw_car(std::vector<GpuVertex>& triangles,const RenderVehicle& car,bool n6
             for(int i:{0,1,2,0,2,3}) triangles.push_back(quad[i]);
         }
     };
-    if(interior) {
+    if(interior && car.descriptor==f_type_player_shell) {
+        static const Mesh dash=single_seat_dash();
+        draw(dash,car.position,1,car.orientation);
+    } else if(interior) {
         static const Mesh cockpit=rally_cockpit(),coupe_cockpit=rally_cockpit(true);
         draw(car.descriptor==coupe_player_shell?coupe_cockpit:cockpit,car.position,1,car.orientation);
         return;
     }
-    const bool rally_player=car.player && car.descriptor!=coupe_player_shell;
+    const bool rally_player=car.player && !original_player_shell(car.descriptor);
     if(rally_player) {
         draw(body,car.position,1,car.orientation);
         if(!n64_lighting) {
@@ -264,8 +290,8 @@ void draw_car(std::vector<GpuVertex>& triangles,const RenderVehicle& car,bool n6
             draw(hood,car.position,1,car.orientation);
         }
     } else {
-        static const Mesh single=opponent_trim(0xa7e8),coupe=opponent_trim(coupe_rival_shell),pickup=opponent_trim(0xa820);
-        if(car.descriptor==0xa7e8)draw(single,car.position,1,car.orientation);
+        static const Mesh single=opponent_trim(f_type_rival_shell),coupe=opponent_trim(coupe_rival_shell),pickup=opponent_trim(0xa820);
+        if(car.descriptor==f_type_rival_shell || car.descriptor==f_type_player_shell)draw(single,car.position,1,car.orientation);
         if(car.descriptor==coupe_rival_shell || car.descriptor==coupe_player_shell)draw(coupe,car.position,1,car.orientation);
         if(car.descriptor==0xa820)draw(pickup,car.position,1,car.orientation);
     }

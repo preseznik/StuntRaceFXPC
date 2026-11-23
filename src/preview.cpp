@@ -1269,7 +1269,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
             else if(!aqua_style && !sunset_style && !night_style && !ravine_style && !sky_ramp_style)n64::coastal_terrain(landscape,world,models,normalize);
         }
         const auto draw_model=[&](const srf::WorldModel& model,const auto& transform,std::uint8_t opcode=0,std::int16_t descriptor_bias=0,float painter_depth=0,bool static_model=false,
-                                  std::optional<std::size_t> animation_frame=std::nullopt, unsigned sign_phase=0) {
+                                  std::optional<std::size_t> animation_frame=std::nullopt, unsigned sign_phase=0, bool open_cockpit=false) {
             const auto pose_index=animation_frame.value_or(frame)%model.frames.size();
             const auto& pose=model.frames[pose_index];
             const auto key=std::pair<unsigned,std::size_t>{model.descriptor_address,pose_index};
@@ -1307,6 +1307,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 const bool priority_line=face.indices.size()==2 && (opcode==0x0c || descriptor_bias>0);
                 const float support_depth=(priority_line || srf::road_support_surface(opcode,descriptor_bias,pose,face))?painter_depth:0.f;
                 const unsigned material=face.attributes[2];
+                if(open_cockpit && material==0x0d)continue; // exterior canopy, above the F-TYPE's seat
                 if(truss && face.indices.size()==4 && (material==0x34 || material==0x36)) {
                     // The two paint indices are opposite windings of the same flat member.
                     if(material==0x34 && !landscape_buffer) {
@@ -1333,8 +1334,8 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 const bool course_sign=material==0xc5 && sign_phase!=0;
                 const auto texture=texture_locations.find(course_sign ? std::pair{0x9ba3u,sign_phase} : std::pair{0x8f91u,material});
                 const bool textured=texture!=texture_locations.end() && face.indices.size()==4;
-                const bool player_coupe=enhanced_scene && descriptor==n64::coupe_player_shell;
-                const bool windshield=(opponent_shell || player_coupe) && material==0x0d;
+                const bool original_player=enhanced_scene && n64::original_player_shell(descriptor);
+                const bool windshield=(opponent_shell || original_player) && material==0x0d;
                 const bool side_glass=std::abs(int(std::int8_t(face.attributes[3])))>std::abs(int(std::int8_t(face.attributes[5])));
                 int left=INT_MAX,right=INT_MIN,top=INT_MAX,bottom=INT_MIN;
                 if(windshield)for(auto index:face.indices) {
@@ -1361,6 +1362,10 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 }
                 auto vertex=[&](unsigned index) {
                     auto local=pose.at(index);
+                    // The F-TYPE wing has coincident white and dark faces in the
+                    // ROM. Separate its underside in the two-sided player pass.
+                    if(enhanced_scene && descriptor==n64::f_type_player_shell && material==4 && local.y==-64)
+                        local.y+=3;
                     // The gantry's two inner leg faces coincide with the barrier
                     // faces at +/-1920. Clear the 11-unit rail cap as well.
                     if(enhanced_scene && model.descriptor_address==0xac9c && std::abs(local.x)==1920)
@@ -1416,7 +1421,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
                     return out;
                 };
                 if(face.indices.size()==2) {
-                    if(player_coupe && race_camera.view==RaceCamera::cockpit)continue;
+                    if(original_player && race_camera.view==RaceCamera::cockpit)continue;
                     lines.push_back(vertex(face.indices[0])); lines.push_back(vertex(face.indices[1]));
                 } else for(std::size_t i=1;i+1<face.indices.size();++i) {
                     for(auto index:{face.indices[0],face.indices[i],face.indices[i+1]}) triangles.push_back(vertex(index));
@@ -1509,7 +1514,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
         // From the banked descent the road crosses in front of the lake creature.
         // Depth-test lake scenery against the deck before applying racer priority.
         if(lake_style)draw_actors(scenery);
-        const auto draw_shell=[&](const RenderVehicle& vehicle) {
+        const auto draw_shell=[&](const RenderVehicle& vehicle,bool open_cockpit=false) {
             const auto found=models.find(vehicle.descriptor);
             if(found==models.end()) throw std::runtime_error("Original vehicle visual descriptor missing from generated world");
             draw_model(*found->second,[&](const srf::Vertex& v) {
@@ -1517,7 +1522,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 auto p=vehicle.position;
                 for(unsigned a=0;a<3;++a) for(unsigned b=0;b<3;++b) p[a]+=local[b]*vehicle.orientation[b*3+a];
                 return p;
-            });
+            },0,0,0,false,std::nullopt,0,open_cockpit);
         };
         const bool mesh_rivals=enhanced_scene && !n64_mode;
         rival_start=static_cast<UINT>(triangles.size());
@@ -1549,16 +1554,18 @@ float4 main(float4 position : SV_Position) : SV_Target {
             const auto p=normalize_world(vehicle.position);
             shadow_origin={p[0],p[1],p[2],float(world_radius/90)};
             shadow_axis={vehicle.orientation[0],vehicle.orientation[2],vehicle.orientation[6],vehicle.orientation[8]};
-            if(vehicle.descriptor==n64::coupe_player_shell)draw_shell(vehicle);
+            if(n64::original_player_shell(vehicle.descriptor))draw_shell(vehicle);
             n64::draw_car(triangles,vehicle,n64_mode,[this](const auto& p){return normalize_world(p);});
         }
         car_shadow_vertices=static_cast<UINT>(triangles.size())-surface_count;
         if(enhanced_scene && !race_camera.mounted())
-            for(const auto& vehicle:vehicles)if(vehicle.player && vehicle.descriptor==n64::coupe_player_shell)
+            for(const auto& vehicle:vehicles)if(vehicle.player && n64::original_player_shell(vehicle.descriptor))
                 for(const auto& sprite:vehicle.sprites)if(!sprite.wheel)draw_sprite(sprite,vehicle_winding);
         if(mesh_rivals && race_camera.view==RaceCamera::cockpit)
-            for(const auto& vehicle:vehicles)if(vehicle.player)
+            for(const auto& vehicle:vehicles)if(vehicle.player) {
+                if(vehicle.descriptor==n64::f_type_player_shell)draw_shell(vehicle,true);
                 n64::draw_car(triangles,vehicle,false,[this](const auto& p){return normalize_world(p);},true);
+            }
         if(race)for(const auto sprites:{race->spray_sprites(),race->breakable_sprites()}) {
             for(const auto& sprite:sprites) {
                 const auto p=sprite.position;
@@ -2324,8 +2331,10 @@ void chase_camera(const Renderer& renderer,const RenderVehicle& vehicle,float ya
         if(race_camera.mounted()) {
             const bool cockpit=race_camera.view==RaceCamera::cockpit;
             const bool coupe=vehicle.descriptor==n64::coupe_player_shell;
-            const auto eye=cockpit ? (coupe?std::array{-12.f,-89.f,-41.f}:std::array{-18.f,-85.f,-23.f})
+            auto eye=cockpit ? (coupe?std::array{-12.f,-89.f,-41.f}:std::array{-18.f,-85.f,-23.f})
                                    : (coupe?std::array{0.f,-72.f,41.f}:std::array{0.f,-81.f,66.f});
+            if(vehicle.descriptor==n64::f_type_player_shell)
+                eye=cockpit?std::array{0.f,-80.f,-2.f}:std::array{0.f,-63.f,65.f};
             auto mount=vehicle.position;
             for(unsigned axis=0;axis<3;++axis)for(unsigned local=0;local<3;++local)
                 mount[axis]+=eye[local]*vehicle.orientation[local*3+axis];
@@ -2572,8 +2581,8 @@ int wmain(int argc,wchar_t** argv) {
         if((msaa || weather) && look!=RaceLook::remastered)throw std::runtime_error("--msaa and --weather require --remastered.");
         if(time_of_day && look!=RaceLook::remastered)throw std::runtime_error("--time-of-day requires --remastered.");
         if(n64_low_raster && look!=RaceLook::n64)throw std::runtime_error("--n64-240p requires --n64.");
-        if(look!=RaceLook::classic && (!controls.race || launch_game || vr || validate || player_car==srf::PlayerCar::f_type))
-            throw std::runtime_error("Enhanced styles require a desktop 4WD or Coupé race.");
+        if(look!=RaceLook::classic && (!controls.race || launch_game || vr || validate))
+            throw std::runtime_error("Enhanced styles require a desktop Quick Race.");
         if(vr && (launch_game || !controls.race || (course!=srf::CourseId::easy_ride && course!=srf::CourseId::aqua_tunnel) || player_car!=srf::PlayerCar::four_wd || !screenshot.empty() || validate || steps || restart_check || !trace_path.empty() || fixed_control))
             throw std::runtime_error("VR requires a 4WD race on Easy Ride or Aqua Tunnel.");
         if((desktop_fps && (desktop_fps<30 || desktop_fps>240)) || (vr_refresh && (vr_refresh<60 || vr_refresh>240)) ||

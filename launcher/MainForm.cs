@@ -415,7 +415,7 @@ internal sealed class MainForm : Form
         launch.Text = VrSelected ? "Launch VR" : quick ? "Launch Quick Race" : "Launch Game";
         courseTitle.Text = enhanced ? $"{course.Text} ({visualStyle.Text})" : VrSelected ? $"{SelectedVrCourse.Name} VR" : quick ? course.Text : "Game startup";
         preview.AccessibleName = enhanced ? $"{visualStyle.Text} {car.Text} on {course.Text}" : VrSelected ? $"4WD on {SelectedVrCourse.Name}" : quick ? $"{car.Text} on {course.Text}" : "Game startup preview";
-        session.Text = quick && !styleAvailable ? "Select the 4WD or COUPE to use N64 Mode or Remastered in Quick Race." : VrSelected ? "4WD • Bonnet view • F2 or right stick to recenter." : quick ? "Three laps against three opponents." : "Start the game and choose your car and class in the game menus.";
+        session.Text = VrSelected ? "4WD • Bonnet view • F2 or right stick to recenter." : quick ? "Three laps against three opponents." : "Start the game and choose your car and class in the game menus.";
         controller.Enabled = active == null && !string.IsNullOrWhiteSpace(output.Text);
         BuildRecord? record = null;
         try { if (!string.IsNullOrWhiteSpace(output.Text)) record = BuildPipeline.LastSuccess(output.Text); }
