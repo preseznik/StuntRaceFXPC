@@ -414,8 +414,8 @@ internal sealed class MainForm : Form
         vrCourse.Enabled = active == null;
         launch.Text = VrSelected ? "Launch VR" : quick ? "Launch Quick Race" : "Launch Game";
         courseTitle.Text = enhanced ? $"{course.Text} ({visualStyle.Text})" : VrSelected ? $"{SelectedVrCourse.Name} VR" : quick ? course.Text : "Game startup";
-        preview.AccessibleName = enhanced ? $"{visualStyle.Text} rally 4WD on {course.Text}" : VrSelected ? $"4WD on {SelectedVrCourse.Name}" : quick ? $"{car.Text} on {course.Text}" : "Game startup preview";
-        session.Text = quick && !styleAvailable ? "Select the 4WD to use N64 Mode or Remastered in Quick Race." : VrSelected ? "4WD • Bonnet view • F2 or right stick to recenter." : quick ? "Three laps against three opponents." : "Start the game and choose your car and class in the game menus.";
+        preview.AccessibleName = enhanced ? $"{visualStyle.Text} {car.Text} on {course.Text}" : VrSelected ? $"4WD on {SelectedVrCourse.Name}" : quick ? $"{car.Text} on {course.Text}" : "Game startup preview";
+        session.Text = quick && !styleAvailable ? "Select the 4WD or COUPE to use N64 Mode or Remastered in Quick Race." : VrSelected ? "4WD • Bonnet view • F2 or right stick to recenter." : quick ? "Three laps against three opponents." : "Start the game and choose your car and class in the game menus.";
         controller.Enabled = active == null && !string.IsNullOrWhiteSpace(output.Text);
         BuildRecord? record = null;
         try { if (!string.IsNullOrWhiteSpace(output.Text)) record = BuildPipeline.LastSuccess(output.Text); }
@@ -426,7 +426,7 @@ internal sealed class MainForm : Form
             record.ContentVersion >= GameContent.Course(CourseId).MinimumContentVersion;
         var stage = record == null ? null : Path.Combine(Path.GetFullPath(output.Text), "builds", record.Directory);
         var courseAvailable = stage != null && File.Exists(Path.Combine(GameContent.AssetDirectory(stage, VrSelected ? SelectedVrCourse.Id : CourseId), "world.srfworld"));
-        launch.Enabled = active == null && (enhanced ? record?.ContentVersion >= GameContent.StyleVersion(CourseId, SelectedStyle) && courseAvailable : VrSelected ? record?.ContentVersion >= SelectedVrCourse.VrVersion && courseAvailable : quick ? compatible && courseAvailable : record?.ContentVersion >= 2);
+        launch.Enabled = active == null && (enhanced ? record?.ContentVersion >= GameContent.StyleVersion(CourseId, CarId, SelectedStyle) && courseAvailable : VrSelected ? record?.ContentVersion >= SelectedVrCourse.VrVersion && courseAvailable : quick ? compatible && courseAvailable : record?.ContentVersion >= 2);
         n64RasterAvailable = record?.ContentVersion >= GameContent.N64RasterVersion;
         n64LowRaster.Enabled = active == null && editingProfile == "N64 Mode" && n64RasterAvailable;
         bool remasteredGraphics = active == null && editingProfile == "Remastered" && record?.ContentVersion >= GameContent.SunLightingVersion;
@@ -448,7 +448,7 @@ internal sealed class MainForm : Form
         if (active == null)
             status.Text = record == null ? "Build the game from Game files to begin."
                 : RemasteredSelected && needsIsometricBuild ? "Rebuild from Game files to use Isometric."
-                : !launch.Enabled && enhanced ? $"Rebuild from Game files to enable {courseTitle.Text}."
+                : !launch.Enabled && enhanced ? $"Rebuild from Game files to enable {car.Text} on {courseTitle.Text}."
                 : !launch.Enabled && VrSelected ? $"Rebuild from Game files to enable {SelectedVrCourse.Name} VR."
                 : !launch.Enabled ? (quick ? "Rebuild from Game files to use this race selection." : "Choose Quick Race or rebuild for Normal mode.")
                 : !quick && record.ContentVersion < GameContent.OriginalBootVersion ? "Rebuild for the original Nintendo splash and menus."
@@ -456,8 +456,8 @@ internal sealed class MainForm : Form
         string? path = null;
         if (stage != null && record != null)
         {
-            if (enhanced) path = record.ContentVersion >= GameContent.StyleVersion(CourseId, SelectedStyle) && courseAvailable
-                ? Path.Combine(stage, GameContent.StylePreview(CourseId, SelectedStyle, record.ContentVersion)) : null;
+            if (enhanced) path = record.ContentVersion >= GameContent.StyleVersion(CourseId, CarId, SelectedStyle) && courseAvailable
+                ? Path.Combine(stage, GameContent.StylePreview(CourseId, CarId, SelectedStyle, record.ContentVersion)) : null;
             else if (VrSelected && courseAvailable) path = Path.Combine(stage, $"preview-{SelectedVrCourse.Id}-4wd.png");
             else if (quick && compatible && courseAvailable)
                 path = Path.Combine(stage, record.ContentVersion >= 2 ? $"preview-{CourseId}-{CarId}.png" : $"preview-{CarId}.png");

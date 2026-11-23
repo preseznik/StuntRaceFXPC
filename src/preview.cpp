@@ -1333,7 +1333,8 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 const bool course_sign=material==0xc5 && sign_phase!=0;
                 const auto texture=texture_locations.find(course_sign ? std::pair{0x9ba3u,sign_phase} : std::pair{0x8f91u,material});
                 const bool textured=texture!=texture_locations.end() && face.indices.size()==4;
-                const bool windshield=opponent_shell && material==0x0d;
+                const bool player_coupe=enhanced_scene && descriptor==n64::coupe_player_shell;
+                const bool windshield=(opponent_shell || player_coupe) && material==0x0d;
                 const bool side_glass=std::abs(int(std::int8_t(face.attributes[3])))>std::abs(int(std::int8_t(face.attributes[5])));
                 int left=INT_MAX,right=INT_MIN,top=INT_MAX,bottom=INT_MIN;
                 if(windshield)for(auto index:face.indices) {
@@ -1415,6 +1416,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
                     return out;
                 };
                 if(face.indices.size()==2) {
+                    if(player_coupe && race_camera.view==RaceCamera::cockpit)continue;
                     lines.push_back(vertex(face.indices[0])); lines.push_back(vertex(face.indices[1]));
                 } else for(std::size_t i=1;i+1<face.indices.size();++i) {
                     for(auto index:{face.indices[0],face.indices[i],face.indices[i+1]}) triangles.push_back(vertex(index));
@@ -1547,9 +1549,13 @@ float4 main(float4 position : SV_Position) : SV_Target {
             const auto p=normalize_world(vehicle.position);
             shadow_origin={p[0],p[1],p[2],float(world_radius/90)};
             shadow_axis={vehicle.orientation[0],vehicle.orientation[2],vehicle.orientation[6],vehicle.orientation[8]};
+            if(vehicle.descriptor==n64::coupe_player_shell)draw_shell(vehicle);
             n64::draw_car(triangles,vehicle,n64_mode,[this](const auto& p){return normalize_world(p);});
         }
         car_shadow_vertices=static_cast<UINT>(triangles.size())-surface_count;
+        if(enhanced_scene && !race_camera.mounted())
+            for(const auto& vehicle:vehicles)if(vehicle.player && vehicle.descriptor==n64::coupe_player_shell)
+                for(const auto& sprite:vehicle.sprites)if(!sprite.wheel)draw_sprite(sprite,vehicle_winding);
         if(mesh_rivals && race_camera.view==RaceCamera::cockpit)
             for(const auto& vehicle:vehicles)if(vehicle.player)
                 n64::draw_car(triangles,vehicle,false,[this](const auto& p){return normalize_world(p);},true);
@@ -2317,7 +2323,9 @@ void chase_camera(const Renderer& renderer,const RenderVehicle& vehicle,float ya
         controls.yaw+=race_camera.heading;
         if(race_camera.mounted()) {
             const bool cockpit=race_camera.view==RaceCamera::cockpit;
-            const std::array<float,3> eye=cockpit?std::array{-18.f,-85.f,-23.f}:std::array{0.f,-81.f,66.f};
+            const bool coupe=vehicle.descriptor==n64::coupe_player_shell;
+            const auto eye=cockpit ? (coupe?std::array{-12.f,-89.f,-41.f}:std::array{-18.f,-85.f,-23.f})
+                                   : (coupe?std::array{0.f,-72.f,41.f}:std::array{0.f,-81.f,66.f});
             auto mount=vehicle.position;
             for(unsigned axis=0;axis<3;++axis)for(unsigned local=0;local<3;++local)
                 mount[axis]+=eye[local]*vehicle.orientation[local*3+axis];
@@ -2564,8 +2572,8 @@ int wmain(int argc,wchar_t** argv) {
         if((msaa || weather) && look!=RaceLook::remastered)throw std::runtime_error("--msaa and --weather require --remastered.");
         if(time_of_day && look!=RaceLook::remastered)throw std::runtime_error("--time-of-day requires --remastered.");
         if(n64_low_raster && look!=RaceLook::n64)throw std::runtime_error("--n64-240p requires --n64.");
-        if(look!=RaceLook::classic && (!controls.race || launch_game || vr || validate || player_car!=srf::PlayerCar::four_wd))
-            throw std::runtime_error("Enhanced styles require a desktop 4WD race.");
+        if(look!=RaceLook::classic && (!controls.race || launch_game || vr || validate || player_car==srf::PlayerCar::f_type))
+            throw std::runtime_error("Enhanced styles require a desktop 4WD or Coupé race.");
         if(vr && (launch_game || !controls.race || (course!=srf::CourseId::easy_ride && course!=srf::CourseId::aqua_tunnel) || player_car!=srf::PlayerCar::four_wd || !screenshot.empty() || validate || steps || restart_check || !trace_path.empty() || fixed_control))
             throw std::runtime_error("VR requires a 4WD race on Easy Ride or Aqua Tunnel.");
         if((desktop_fps && (desktop_fps<30 || desktop_fps>240)) || (vr_refresh && (vr_refresh<60 || vr_refresh>240)) ||

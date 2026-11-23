@@ -4,6 +4,7 @@ namespace n64 {
 using Vec = std::array<float,3>;
 struct Face { std::array<Vec,4> corners; Vec color; bool glass=false; };
 using Mesh = std::vector<Face>;
+constexpr unsigned coupe_player_shell=0xa2a8, coupe_rival_shell=0xa804;
 float tire_radius(const RenderSprite& wheel) {return wheel.diameter*.43f;}
 
 Mesh rally_body() {
@@ -151,7 +152,7 @@ Mesh opponent_trim(unsigned descriptor) {
             x=side*11;
             block({x-4,-11,-99},{x+4,-4,-85},metal);
         }
-    } else if(descriptor==0xa804) { // Coupe sill, front lamps and spoiler lip.
+    } else if(descriptor==coupe_rival_shell) { // Coupe sill, front lamps and spoiler lip.
         block({-65,-53,-139},{65,-48,-135},rubber);
         for(float side:{-1.f,1.f}) {
             float x=side*70;
@@ -169,8 +170,8 @@ Mesh opponent_trim(unsigned descriptor) {
     return mesh;
 }
 
-Mesh rally_cockpit() {
-    Mesh mesh=rally_hood();
+Mesh rally_cockpit(bool coupe=false) {
+    Mesh mesh=coupe?Mesh{}:rally_hood();
     const Vec charcoal{.13f,.16f,.18f},vinyl{.28f,.32f,.32f},alloy{.58f,.60f,.56f};
     auto quad=[&](Vec a,Vec b,Vec c,Vec d,Vec color){mesh.push_back({{a,b,c,d},color});};
     quad({-73,-48,70},{73,-48,70},{70,-60,44},{-70,-60,44},vinyl);
@@ -205,6 +206,16 @@ Mesh rally_cockpit() {
     ring(hub,14,17,{.20f,.23f,.22f});
     for(int i:{0,8,16})quad(circle(hub,3,i-1),circle(hub,14,i-1),circle(hub,14,i),circle(hub,3,i),alloy);
     ring({hub[0],hub[1],hub[2]-.3f},0,4.5f,charcoal);
+    if(coupe) {
+        // Fit the shared instruments to the Coupé's narrower cabin. The
+        // windscreen runs from Z=0 at the roof to Z=40 at the scuttle.
+        for(auto& face:mesh)for(auto& p:face.corners) {
+            p[0]*=.68f;
+            p[1]=.88f*(p[1]+48.f)-60.f;
+            p[2]=(p[2]-36.f)*(40.f/34.f);
+        }
+        quad({-52,-60,40},{52,-60,40},{32,-20,120},{-32,-20,120},{1.f,.66f,.04f});
+    }
     return mesh;
 }
 
@@ -241,20 +252,21 @@ void draw_car(std::vector<GpuVertex>& triangles,const RenderVehicle& car,bool n6
         }
     };
     if(interior) {
-        static const Mesh cockpit=rally_cockpit();
-        draw(cockpit,car.position,1,car.orientation);
+        static const Mesh cockpit=rally_cockpit(),coupe_cockpit=rally_cockpit(true);
+        draw(car.descriptor==coupe_player_shell?coupe_cockpit:cockpit,car.position,1,car.orientation);
         return;
     }
-    if(car.player) {
+    const bool rally_player=car.player && car.descriptor!=coupe_player_shell;
+    if(rally_player) {
         draw(body,car.position,1,car.orientation);
         if(!n64_lighting) {
             static const Mesh hood=rally_hood();
             draw(hood,car.position,1,car.orientation);
         }
     } else {
-        static const Mesh single=opponent_trim(0xa7e8),coupe=opponent_trim(0xa804),pickup=opponent_trim(0xa820);
+        static const Mesh single=opponent_trim(0xa7e8),coupe=opponent_trim(coupe_rival_shell),pickup=opponent_trim(0xa820);
         if(car.descriptor==0xa7e8)draw(single,car.position,1,car.orientation);
-        if(car.descriptor==0xa804)draw(coupe,car.position,1,car.orientation);
+        if(car.descriptor==coupe_rival_shell || car.descriptor==coupe_player_shell)draw(coupe,car.position,1,car.orientation);
         if(car.descriptor==0xa820)draw(pickup,car.position,1,car.orientation);
     }
     for(const auto& sprite:car.sprites) if(sprite.wheel) {
@@ -273,7 +285,7 @@ void draw_car(std::vector<GpuVertex>& triangles,const RenderVehicle& car,bool n6
         float lateral=0;
         for(unsigned a=0;a<3;++a)lateral+=(sprite.position[a]-car.position[a])*mounting[a];
         if(lateral>0)for(unsigned a=0;a<3;++a)mounting[a]=-mounting[a];
-        draw(car.player?fender:axle,sprite.position,radius,mounting);
+        draw(rally_player?fender:axle,sprite.position,radius,mounting);
     }
 }
 } // namespace n64

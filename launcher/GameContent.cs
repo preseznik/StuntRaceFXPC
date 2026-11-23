@@ -10,8 +10,9 @@ internal sealed record GameCourse(string Id, string Name, int ReplayPhases, int 
 internal static class GameContent
 {
     internal const string DefaultCourse = "easy-ride";
-    internal static bool SupportsEnhancedStyles(string course, string car) => car == "4wd" && Courses.Any(entry => entry.Id == course);
-    internal static int StyleVersion(string course, RaceStyle style) => course == "harbor-city" ? HarborCityStyleVersion
+    internal static bool SupportsEnhancedStyles(string course, string car) => (car is "4wd" or "coupe") && Courses.Any(entry => entry.Id == course);
+    internal static int StyleVersion(string course, string car, RaceStyle style) => car == "coupe" ? CoupeStyleVersion
+        : course == "harbor-city" ? HarborCityStyleVersion
         : course == "sky-ramp" ? SkyRampStyleVersion
         : course == "big-ravine" ? BigRavineStyleVersion
         : course == "lake-side" ? LakeSideStyleVersion
@@ -23,9 +24,10 @@ internal static class GameContent
         : course == "sunset-valley" ? SunsetStyleVersion
         : course == "aqua-tunnel" ? AquaStyleVersion
         : style == RaceStyle.Remastered ? RemasteredVersion : N64ModeVersion;
-    internal static string StylePreview(string course, RaceStyle style, int version)
+    internal static string StylePreview(string course, string car, RaceStyle style, int version)
     {
         var look = style == RaceStyle.N64 && version >= N64CommandVersion ? "n64" : "remastered";
+        if (car == "coupe") return $"preview-{course}-coupe-{look}.png";
         return course == DefaultCourse ? $"preview-{look}.png" : $"preview-{course}-{look}.png";
     }
     internal const int OriginalBootVersion = 22;
@@ -48,7 +50,8 @@ internal static class GameContent
     internal const int BigRavineStyleVersion = 52;
     internal const int SkyRampStyleVersion = 53;
     internal const int HarborCityStyleVersion = 54;
-    internal const int CurrentVersion = HarborCityStyleVersion;
+    internal const int CoupeStyleVersion = 55;
+    internal const int CurrentVersion = CoupeStyleVersion;
     internal const int DefaultCameraDistance = 80, MinCameraDistance = 40, MaxCameraDistance = 160;
     internal static readonly string[] CameraIds = ["chase", "far-chase", "cockpit", "bonnet", "isometric"];
     internal static readonly string[] WeatherIds = ["clear", "partly-cloudy", "overcast", "fog", "rain"];

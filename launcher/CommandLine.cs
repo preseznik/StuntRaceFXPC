@@ -378,6 +378,15 @@ internal static class CommandLine
                         if (!style.Enabled) throw new InvalidOperationException("Aqua Tunnel is missing its style selector");
                         courses.SelectedIndex = 0;
                         style.SelectedItem = "N64 Mode";
+                        var carChoice = (ComboBox)form.Controls.Find("PlayerCar", true).Single();
+                        carChoice.SelectedIndex = 1;
+                        foreach (var look in new[] { "Remastered", "N64 Mode" })
+                        {
+                            style.SelectedItem = look;
+                            if (!style.Enabled || launch.Enabled != (version >= GameContent.CoupeStyleVersion))
+                                throw new InvalidOperationException($"Wrong COUPE {look} availability for version {version}");
+                        }
+                        carChoice.SelectedIndex = 0;
                         var lowRaster = (CheckBox)form.Controls.Find("N64LowRaster", true).Single();
                         if (lowRaster.Checked || lowRaster.Enabled != (version >= GameContent.N64RasterVersion))
                             throw new InvalidOperationException($"Wrong N64 raster default or availability for version {version}");

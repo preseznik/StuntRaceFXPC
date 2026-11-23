@@ -145,11 +145,11 @@ internal sealed class BuildPipeline(string source, Action<string> report)
                         "--course", course.Id, "--car", car, "--steps", "50", "--width", "960", "--height", "540",
                         "--restart-check", "--screenshot-no-hud", "--screenshot", Path.Combine(stage, $"preview-{course.Id}-{car}.png")], native, Log, cancel, toolchain);
                 var replay = Path.Combine(source, "tests", "fixtures", course.Id.Replace('-', '_') + "_clean_inputs.csv");
-                if (GameContent.SupportsEnhancedStyles(course.Id, "4wd"))
+                foreach (var styledCar in new[] { "4wd", "coupe" })
                     foreach (var style in new[] { RaceStyle.N64, RaceStyle.Remastered })
-                        await RunAsync(executable, ["--world", world, "--course", course.Id, "--race", style == RaceStyle.N64 ? "--n64" : "--remastered", "--rom", Path.GetFullPath(rom),
-                        "--replay-input", replay, "--steps", course.Id switch { "aqua-tunnel" => "380", "sunset-valley" => "1391", "night-owl" => "388", "kings-forest" => "1853", "sea-breeze" => "505", "white-land" => "1994", "night-cruise" => "1609", "lake-side" => "458", "big-ravine" => "605", "sky-ramp" => "1165", "harbor-city" => "2200", _ => "245" }, "--width", "960", "--height", "540", "--screenshot-no-hud",
-                        "--screenshot", Path.Combine(stage, GameContent.StylePreview(course.Id, style, GameContent.CurrentVersion))], native, Log, cancel, toolchain);
+                        await RunAsync(executable, ["--world", world, "--course", course.Id, "--car", styledCar, "--race", style == RaceStyle.N64 ? "--n64" : "--remastered", "--rom", Path.GetFullPath(rom),
+                        "--replay-input", styledCar == "coupe" ? Path.Combine(source, "tests", "fixtures", course.Id.Replace('-', '_') + "_coupe_inputs.csv") : replay, "--steps", course.Id switch { "aqua-tunnel" => "380", "sunset-valley" => "1391", "night-owl" => "388", "kings-forest" => "1853", "sea-breeze" => "505", "white-land" => "1994", "night-cruise" => "1609", "lake-side" => "458", "big-ravine" => "605", "sky-ramp" => "1165", "harbor-city" => "2200", _ => "245" }, "--width", "960", "--height", "540", "--screenshot-no-hud",
+                        "--screenshot", Path.Combine(stage, GameContent.StylePreview(course.Id, styledCar, style, GameContent.CurrentVersion))], native, Log, cancel, toolchain);
                 var result = await RunAsync(executable, ["--world", world, "--race", "--rom", Path.GetFullPath(rom),
                     "--course", course.Id, "--car", "4wd", "--replay-input", replay, "--restart-check",
                     "--screenshot", Path.Combine(stage, $"race-check-{course.Id}.png")], native, Log, cancel, toolchain);
@@ -318,8 +318,8 @@ internal sealed class BuildPipeline(string source, Action<string> report)
             }
             foreach (var arg in FrameArguments(record.ContentVersion, vr, desktopFps, vrRefresh, vrScale)) info.ArgumentList.Add(arg);
             if (style != RaceStyle.Original && (game || vr || !GameContent.SupportsEnhancedStyles(course, car)))
-                throw new InvalidOperationException("Choose a desktop 4WD Quick Race for an enhanced visual style.");
-            if (style != RaceStyle.Original && record.ContentVersion < GameContent.StyleVersion(course, style))
+                throw new InvalidOperationException("Choose a desktop 4WD or COUPE Quick Race for an enhanced visual style.");
+            if (style != RaceStyle.Original && record.ContentVersion < GameContent.StyleVersion(course, car, style))
                 throw new InvalidOperationException($"Rebuild from Game files to enable this visual style on {GameContent.Course(course).Name}.");
             if (style == RaceStyle.N64)
             {
