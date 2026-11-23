@@ -56,6 +56,7 @@ void run_bonnet_drive(HWND window,srf::vr::Drive& drive,Renderer& renderer,const
     bool show_midpoint=false;
     uint64_t uploaded=UINT64_MAX;
     uint64_t scene_updates=0;
+    std::string_view last_backdrop;
     bool muted=false,finished=false;
     drive.run([&]{
         MSG msg{};
@@ -92,7 +93,15 @@ void run_bonnet_drive(HWND window,srf::vr::Drive& drive,Renderer& renderer,const
         const uint64_t pose_id=2*race.phase()-unsigned(show_midpoint);
         if(uploaded!=pose_id){
             const auto& cars=show_midpoint?midpoint:race.racers();
-            renderer.set_environment(environment.presentation());
+            const auto presentation=environment.presentation();
+            renderer.set_environment(presentation);
+            if(race.course_id()==srf::CourseId::aqua_tunnel){
+                const std::string_view backdrop=presentation.blank_backdrop?"transition":presentation.alternate_backdrop?"underwater":"surface";
+                if(backdrop!=last_backdrop){
+                    log<<"Aqua backdrop "<<backdrop<<" at phase "<<race.phase()<<std::endl;
+                    last_backdrop=backdrop;
+                }
+            }
             load_bonnet_pose(renderer,world,rom,race,scenery,cars);
             uploaded=pose_id;++scene_updates;
         }

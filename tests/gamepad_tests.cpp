@@ -222,6 +222,14 @@ int wmain(int argc,wchar_t** argv) {
             input.poll(true);
             require(input.status().find("Stunt Race FX input regression")!=std::string::npos,"Hotplug selection");
             pad.axis(SDL_GAMEPAD_AXIS_LEFTX,7999);require(input.poll(true).requested==0,"Steering deadzone");
+            pad.axis(SDL_GAMEPAD_AXIS_RIGHTX,7999);
+            require(input.poll(true,true).look_x==0,"Right stick camera deadzone");
+            pad.axis(SDL_GAMEPAD_AXIS_RIGHTX,32767); pad.axis(SDL_GAMEPAD_AXIS_RIGHTY,-32768);
+            require(input.poll(true).look_x==0,"Camera look must be opt-in");
+            const auto look=input.poll(true,true);
+            require(look.look_x==1 && look.look_y==-1 && look.requested==0,"Camera stick independent of driving");
+            require(input.poll(false,true).look_y==0,"Camera look ignores unfocused pad");
+            pad.neutral();input.poll(true);
             pad.axis(SDL_GAMEPAD_AXIS_LEFTX,8000);require(input.poll(true).requested==2,"Positive steering threshold");
             pad.axis(SDL_GAMEPAD_AXIS_LEFTX,-8000);require(input.poll(true).requested==1,"Negative steering threshold");
             pad.neutral();pad.axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,32767);require(input.poll(true).requested==0x10,"Right trigger throttle");
@@ -252,6 +260,7 @@ int wmain(int argc,wchar_t** argv) {
             pad.neutral();pad.button(SDL_GAMEPAD_BUTTON_SOUTH,true);require(input.poll(true).requested==0x40,"Remapped south brake");
             pad.neutral();pad.axis(SDL_GAMEPAD_AXIS_LEFTX,32767);require(input.poll(true).requested==0,"Disabled old steering axis");
             pad.axis(SDL_GAMEPAD_AXIS_RIGHTX,12000);require(input.poll(true).requested==2,"Remapped steering axis and threshold");
+            require(input.poll(true,true).look_x==0,"Remapped steering axis must not rotate camera");
         }
         {std::ofstream file(config);file<<"steering_mode=ANALOG\n";}
         {

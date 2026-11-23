@@ -1,9 +1,10 @@
-"""Run the Easy Ride fixture twice in one xr-sim session, restarting with R."""
+"""Run a 4WD course fixture twice in one xr-sim session, restarting with R."""
 
 import argparse
 import ctypes
 from ctypes import wintypes
 import json
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -12,9 +13,7 @@ import time
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-FINISH = "Finished three laps at phase 1637"
-RESULT = "Result: 3 laps, place 3, 58 seconds left"
-RESTART = "Restart at phase 1637"
+RESULTS = {"easy-ride": (1637, 3, 58), "aqua-tunnel": (2206, 4, 18)}
 
 
 def wait_for(game, description, probe, timeout=15):
@@ -72,8 +71,26 @@ def capture(game, run, tag):
     return eyes
 
 
-def replay(game, run):
+def check_aqua_sky(eyes, tag, underwater):
+    from PIL import Image
+
+    for side, data in zip(("left", "right"), eyes):
+        with Image.open(io.BytesIO(data)) as image:
+            sky = image.convert("RGB").crop((0, 0, image.width, image.height // 3))
+        colors = sky.getcolors(sky.width * sky.height)
+        daylight = sum(n for n, (r, g, b) in colors if r >= 125 and g >= 165 and b >= 195)
+        water = sum(n for n, (r, g, b) in colors if r <= 20 and g >= 65 and b >= 125)
+        print(f"{tag} {side} sky: {daylight} daylight pixels, {water} underwater pixels", flush=True)
+        expected, other = (water, daylight) if underwater else (daylight, water)
+        if expected < sky.width * sky.height // 50 or expected <= other:
+            raise RuntimeError(f"{tag}: wrong backdrop palette in {side} eye")
+
+
+def replay(game, run, course):
     log = run / "openxr-last-drive.log"
+    phase, place, seconds = RESULTS[course]
+    first = [f"Finished three laps at phase {phase}", f"Result: 3 laps, place {place}, {seconds} seconds left"]
+    restart = f"Restart at phase {phase}"
 
     def events():
         return [line for line in log.read_text().splitlines()
@@ -85,24 +102,41 @@ def replay(game, run):
             raise RuntimeError(f"Unexpected race events: {actual}")
         return actual == expected
 
-    def ready():
+    def focused_frames():
         state = json.loads((run / "state.json").read_bytes())
-        return (state["pid"] == game.pid and state["runtime"] == "xr-sim" and state["graphics"] == "D3D11"
-                and state["sessionState"] == "FOCUSED" and state["layeredFrames"] >= 45)
+        if (state["pid"] == game.pid and state["runtime"] == "xr-sim" and state["graphics"] == "D3D11"
+                and state["sessionState"] == "FOCUSED"):
+            return state["layeredFrames"]
+        return 0
 
-    wait_for(game, "focused xr-sim session", ready, 30)
+    wait_for(game, "settled starting grid", lambda: focused_frames() >= 45, 30)
     grid = capture(game, run, "grid")
-    first = [FINISH, RESULT]
+    if course == "aqua-tunnel":
+        check_aqua_sky(grid, "grid", False)
+        for phase_number, mode, tag in ((321, "transition", "entry"), (340, "underwater", "underwater"),
+                                        (713, "transition", "exit"), (741, "surface", "resurfaced")):
+            event = f"Aqua backdrop {mode} at phase {phase_number}"
+            wait_for(game, event, lambda: event in log.read_text().splitlines(), 70)
+            if mode != "transition":
+                # Allow the recovered palette fade to finish before sampling the panorama.
+                start = wait_for(game, "focused xr-sim frame", focused_frames)
+                wait_for(game, tag, lambda: focused_frames() >= start + 145)
+            eyes = capture(game, run, tag)
+            if mode != "transition":
+                check_aqua_sky(eyes, tag, mode == "underwater")
     wait_for(game, "first three-lap finish", lambda: check_events(first), 180)
     finish = capture(game, run, "finish")
     if finish == grid:
         raise RuntimeError("Finish rendered the starting grid")
 
     post_to_game(game.pid, 0x0100, ord("R"))  # WM_KEYDOWN on the companion window
-    wait_for(game, "post-finish restart", lambda: check_events(first + [RESTART]))
+    wait_for(game, "post-finish restart", lambda: check_events(first + [restart]))
+    # The first native updates sort the four cars into their grid standings.
+    restarted = wait_for(game, "focused restart frame", focused_frames)
+    wait_for(game, "settled restarted grid", lambda: focused_frames() >= restarted + 45)
     if capture(game, run, "restarted-grid") != grid:
         raise RuntimeError("Restart did not reproduce the initial stereo grid")
-    wait_for(game, "second three-lap finish", lambda: check_events(first + [RESTART] + first), 180)
+    wait_for(game, "second three-lap finish", lambda: check_events(first + [restart] + first), 200)
     if capture(game, run, "second-finish") != finish:
         raise RuntimeError("Second finish did not reproduce the first stereo finish")
     post_to_game(game.pid, 0x0010)  # WM_CLOSE
@@ -114,6 +148,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("game", "world", "runtime_dll"):
         parser.add_argument(name, type=Path)
+    parser.add_argument("--course", choices=RESULTS, default="easy-ride")
     args = parser.parse_args()
     if not os.environ.get("SRF_ROM"):
         print("Set SRF_ROM to the local USA Rev 1 ROM to run this test")
@@ -121,8 +156,9 @@ def main():
     rom = Path(os.environ["SRF_ROM"]).resolve(strict=True)
     runtime = args.runtime_dll.resolve(strict=True)
     command = [args.game.resolve(strict=True), "--world", args.world.resolve(strict=True), "--race",
-               "--rom", rom, "--vr", "--vr-hz", "90", "--replay-input", FIXTURES / "easy_ride_clean_inputs.csv"]
-    run = Path(tempfile.mkdtemp(prefix="xrsim-replay-", dir=Path.cwd()))
+               "--rom", rom, "--vr", "--course", args.course, "--vr-hz", "90", "--replay-input",
+               FIXTURES / (args.course.replace("-", "_") + "_clean_inputs.csv")]
+    run = Path(tempfile.mkdtemp(prefix=f"xrsim-{args.course}-", dir=Path.cwd()))
     print(f"Game logs and stereo captures: {run}", flush=True)
     manifest = run / "runtime.json"
     manifest.write_text(json.dumps({"file_format_version": "1.0.0",
@@ -132,7 +168,7 @@ def main():
     with (run / "game-output.log").open("wb") as output:
         game = subprocess.Popen(command, cwd=run, env=env, stdout=output, stderr=subprocess.STDOUT)
         try:
-            replay(game, run)
+            replay(game, run, args.course)
         finally:
             if game.poll() is None:
                 game.kill()

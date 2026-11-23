@@ -2,10 +2,15 @@ using System.Text.Json;
 
 namespace StuntRaceFX.Launcher;
 
+internal sealed record DisplaySettings(string Resolution = "1920 x 1080", bool Borderless = false, int DesktopFps = 0);
+
 internal sealed record LauncherSettings(string RomPath = "", string OutputPath = "",
     string Car = "4wd", string Resolution = "1920 x 1080", bool Borderless = false,
     string Course = GameContent.DefaultCourse, bool QuickRace = false, bool EasyRideVr = false,
-    int DesktopFps = 0, int VrRefresh = 0, int VrScale = 100);
+    int DesktopFps = 0, int VrRefresh = 0, int VrScale = 100, string VrCourse = GameContent.DefaultCourse, bool N64Mode = false,
+    bool N64LowRaster = false, bool RemasteredMode = false, Dictionary<string, DisplaySettings>? GraphicsProfiles = null, int RemasteredHour = 12,
+    int RemasteredMsaa = 0, string RemasteredWeather = "clear", string RemasteredCamera = "chase", bool CameraLook = false,
+    int MaxCameraDistance = GameContent.DefaultCameraDistance, string? QuickRaceStyle = null);
 
 internal sealed class MainForm : Form
 {
@@ -29,11 +34,28 @@ internal sealed class MainForm : Form
     private readonly Button launch = new() { Name = "LaunchGame", Text = "Launch Game", AutoSize = true, Padding = new Padding(18, 5, 18, 5) };
     private readonly ComboBox launchMode = new() { Name = "LaunchMode", DropDownStyle = ComboBoxStyle.DropDownList, Width = 135, AccessibleName = "Launch mode", Anchor = AnchorStyles.Left };
     private readonly TableLayoutPanel quickSettings = new() { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, Margin = Padding.Empty };
+    private readonly ComboBox visualStyle = new() { Name = "VisualStyle", AccessibleName = "Visual style", DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top };
+    private RaceStyle preferredStyle;
     private readonly Button inspect = new() { Text = "Inspect models", AutoSize = true };
     private readonly Button controller = new() { Text = "Configure controller…", AutoSize = true };
     private readonly ComboBox car = new() { Name = "PlayerCar", DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top, AccessibleName = "Player car" };
     private readonly ComboBox course = new() { Name = "Course", DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top, AccessibleName = "Course" };
+    private readonly ComboBox vrCourse = new() { Name = "VrCourse", DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top, AccessibleName = "4WD VR course" };
     private readonly ComboBox resolution = new() { Name = "Resolution", DropDownStyle = ComboBoxStyle.DropDownList, Width = 210, AccessibleName = "Window resolution" };
+    private readonly CheckBox n64LowRaster = new() { Name = "N64LowRaster", Text = "Render N64 mode at 320 × 240 (4:3)", AutoSize = true };
+    private readonly ComboBox graphicsProfile = new() { Name = "GraphicsProfile", AccessibleName = "Graphics profile", DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
+    private readonly ComboBox timeOfDay = new() { Name = "TimeOfDay", AccessibleName = "Time of day", DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
+    private readonly ComboBox msaa = Choices("RemasteredMsaa", "Anti-aliasing", "× MSAA", "Off", 0, 2, 4, 8);
+    private readonly ComboBox weather = new() { Name = "RemasteredWeather", AccessibleName = "Weather", DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
+    private readonly ComboBox camera = new() { Name = "RemasteredCamera", AccessibleName = "Starting camera", DropDownStyle = ComboBoxStyle.DropDownList, Width = 210 };
+    private readonly CheckBox cameraLook = new() { Name = "CameraLook", Text = "Mouse and right stick camera control", AutoSize = true };
+    private readonly TrackBar cameraDistance = new() { Name = "CameraDistance", AccessibleName = "Maximum camera zoom distance in metres",
+        Minimum = GameContent.MinCameraDistance, Maximum = GameContent.MaxCameraDistance, Value = GameContent.DefaultCameraDistance,
+        LargeChange = 10, TickFrequency = 10, Width = 210 };
+    private readonly Label lightingHint = Hint("Local track time stays fixed during the race.");
+    private readonly Dictionary<string, DisplaySettings> profiles = new();
+    private string? editingProfile;
+    private bool n64RasterAvailable;
     private readonly ComboBox windowMode = new() { Name = "WindowMode", DropDownStyle = ComboBoxStyle.DropDownList, Width = 210, AccessibleName = "Window mode" };
     private readonly ComboBox desktopFps = Choices("DesktopFps", "Desktop driving frame limit", " FPS", "Display sync", 0, 30, 60, 90, 120, 144);
     private readonly ComboBox vrRefresh = Choices("VrRefresh", "Preferred headset refresh", " Hz", "Runtime default", 0, 72, 80, 90, 120, 144);
@@ -53,7 +75,12 @@ internal sealed class MainForm : Form
     private string? previewPath;
     private string CarId => ((CarChoice)car.SelectedItem!).Id;
     private string CourseId => ((GameCourse)course.SelectedItem!).Id;
+    private GameCourse SelectedVrCourse => (GameCourse)vrCourse.SelectedItem!;
     private bool VrSelected => launchMode.SelectedIndex == 2;
+    private RaceStyle SelectedStyle => QuickRaceSelected ? (RaceStyle)visualStyle.SelectedIndex : RaceStyle.Original;
+    private bool N64ModeSelected => SelectedStyle == RaceStyle.N64;
+    private bool RemasteredSelected => SelectedStyle == RaceStyle.Remastered;
+    private string LaunchProfile => QuickRaceSelected ? visualStyle.Text : launchMode.Text;
     private bool QuickRaceSelected => launchMode.SelectedIndex == 1;
 
     public MainForm(string? settingsPath = null)
@@ -73,12 +100,16 @@ internal sealed class MainForm : Form
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         for (var i = 1; i < 4; ++i) footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         status.Anchor = AnchorStyles.Left;
-        launchMode.Items.AddRange(["Normal", "Quick Race", "Easy Ride VR"]); launchMode.SelectedIndex = 0;
+        launchMode.Items.AddRange(["Normal", "Quick Race", "4WD VR"]); launchMode.SelectedIndex = 0;
+        string[] styles = ["Original", "N64 Mode", "Remastered"];
+        visualStyle.Items.AddRange(styles); visualStyle.SelectedIndex = 0;
+        graphicsProfile.Items.AddRange(["Normal", .. styles, "4WD VR"]);
         footer.Controls.Add(status, 0, 0);
         footer.Controls.Add(new Label { Text = "Launch &mode", AutoSize = true, Anchor = AnchorStyles.Left }, 1, 0);
         footer.Controls.Add(launchMode, 2, 0); footer.Controls.Add(launch, 3, 0); root.Controls.Add(footer); Controls.Add(root);
         car.Items.AddRange([new CarChoice("4wd", "4WD"), new CarChoice("coupe", "COUPE"), new CarChoice("f-type", "F-TYPE")]); car.SelectedIndex = 0;
         course.Items.AddRange(GameContent.Courses.Cast<object>().ToArray()); course.SelectedIndex = 0;
+        vrCourse.Items.AddRange(GameContent.Courses.Where(c => c.VrVersion.HasValue).ToArray()); vrCourse.SelectedIndex = 0;
         resolution.Items.AddRange(["1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"]); resolution.SelectedIndex = 1;
         windowMode.Items.AddRange(["Windowed", "Borderless fullscreen"]); windowMode.SelectedIndex = 0;
 
@@ -95,7 +126,9 @@ internal sealed class MainForm : Form
         quickSettings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         quickSettings.Controls.Add(Heading("Course")); quickSettings.Controls.Add(course);
         quickSettings.Controls.Add(Heading("Your car", 18)); quickSettings.Controls.Add(car);
+        quickSettings.Controls.Add(Heading("Visual style", 18)); quickSettings.Controls.Add(visualStyle);
         selection.Controls.Add(quickSettings);
+        selection.Controls.Add(vrCourse);
         selection.Controls.Add(session); selection.Controls.Add(availability);
         raceLayout.Controls.Add(coursePanel, 0, 0); raceLayout.Controls.Add(selection, 1, 0); racePage.Controls.Add(raceLayout);
 
@@ -103,13 +136,36 @@ internal sealed class MainForm : Form
         displayColumns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         displayColumns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         var graphics = Stack(); var headset = Stack();
-        displayColumns.Controls.Add(graphics, 0, 0); displayColumns.Controls.Add(headset, 1, 0);
+        displayColumns.Controls.Add(graphics, 0, 0); var modeOptions = new Panel { Dock = DockStyle.Fill };
+        modeOptions.Controls.Add(headset); displayColumns.Controls.Add(modeOptions, 1, 0);
+        var lighting = Stack();
+        modeOptions.Controls.Add(lighting);
+        lighting.Controls.Add(Heading("Remastered"));
+        lighting.Controls.Add(Hint("Anti-aliasing")); lighting.Controls.Add(msaa);
+        weather.Items.AddRange(["Clear", "Partly cloudy", "Overcast", "Fog", "Rain"]);
+        weather.SelectedIndex = 0;
+        lighting.Controls.Add(Hint("Weather")); lighting.Controls.Add(weather);
+        lighting.Controls.Add(Hint("Time of day")); lighting.Controls.Add(timeOfDay);
+        camera.Items.AddRange(["Chase", "Far chase", "Cockpit", "Bonnet / hood", "Isometric"]);
+        camera.SelectedIndex = 0;
+        lighting.Controls.Add(Hint("Starting camera")); lighting.Controls.Add(camera);
+        lighting.Controls.Add(cameraLook);
+        var distanceLabel = Hint($"Maximum zoom distance: {cameraDistance.Value} m");
+        cameraDistance.ValueChanged += (_, _) => distanceLabel.Text = $"Maximum zoom distance: {cameraDistance.Value} m";
+        lighting.Controls.Add(distanceLabel); lighting.Controls.Add(cameraDistance);
+        lightingHint.MaximumSize = new Size(295, 0);
+        lighting.Controls.Add(lightingHint);
+        for (int hour = 0; hour < 24; ++hour) timeOfDay.Items.Add($"{hour:00}:00");
+        timeOfDay.SelectedIndex = 12;
         Page("Graphics").Controls.Add(displayColumns);
-        graphics.Controls.Add(Heading("Display")); graphics.Controls.Add(Hint("Window mode")); graphics.Controls.Add(windowMode);
+        graphics.Controls.Add(Heading("Graphics profile")); graphics.Controls.Add(graphicsProfile);
+        graphics.Controls.Add(Hint("Window mode", 6, 18)); graphics.Controls.Add(windowMode);
         graphics.Controls.Add(Hint("Window resolution", 6, 18)); graphics.Controls.Add(resolution);
-        graphics.Controls.Add(Hint("Desktop driving frame limit")); graphics.Controls.Add(desktopFps);
+        graphics.Controls.Add(n64LowRaster);
+        var fpsLabel = Hint("Desktop driving frame limit");
+        graphics.Controls.Add(fpsLabel); graphics.Controls.Add(desktopFps);
         graphics.Controls.Add(Hint("F11 switches window mode during a race.", 10, 10));
-        headset.Controls.Add(Heading("Easy Ride VR"));
+        headset.Controls.Add(Heading("4WD VR"));
         headset.Controls.Add(Hint("Preferred headset refresh")); headset.Controls.Add(vrRefresh);
         headset.Controls.Add(Hint("Eye resolution", 6, 18)); headset.Controls.Add(vrScale);
         headset.Controls.Add(Hint("Lower eye resolution reduces GPU work. The HUD stays at full resolution.", 6, 10));
@@ -168,9 +224,26 @@ internal sealed class MainForm : Form
             }
             catch (Exception error) { ShowError(error); }
         };
-        output.TextChanged += (_, _) => RefreshLaunch(); car.SelectedIndexChanged += (_, _) => RefreshLaunch();
-        launchMode.SelectedIndexChanged += (_, _) => RefreshLaunch();
-        course.SelectedIndexChanged += (_, _) => RefreshLaunch();
+        output.TextChanged += (_, _) => RefreshLaunch();
+        graphicsProfile.SelectedIndexChanged += (_, _) => {
+            SelectGraphicsProfile();
+            headset.Visible = graphicsProfile.Text == "4WD VR";
+            lighting.Visible = graphicsProfile.Text == "Remastered";
+            desktopFps.Visible = fpsLabel.Visible = graphicsProfile.Text != "4WD VR";
+            n64LowRaster.Visible = graphicsProfile.Text == "N64 Mode";
+            RefreshLaunch();
+        };
+        graphicsProfile.SelectedIndex = 0;
+        launchMode.SelectedIndexChanged += (_, _) => SelectRaceProfile();
+        course.SelectedIndexChanged += (_, _) => SelectRaceProfile();
+        car.SelectedIndexChanged += (_, _) => SelectRaceProfile();
+        visualStyle.SelectedIndexChanged += (_, _) => {
+            if (QuickRaceSelected && GameContent.SupportsEnhancedStyles(CourseId, CarId)) preferredStyle = SelectedStyle;
+            graphicsProfile.SelectedItem = LaunchProfile;
+            RefreshLaunch();
+        };
+        camera.SelectedIndexChanged += (_, _) => RefreshLaunch();
+        vrCourse.SelectedIndexChanged += (_, _) => RefreshLaunch();
         FormClosing += (_, args) => { if (active != null) { args.Cancel = true; closeAfterCancel = true; active.Cancel(); } else SaveSettings(); };
         LoadSettings(); RefreshLaunch();
     }
@@ -180,11 +253,15 @@ internal sealed class MainForm : Form
         try
         {
             SaveSettings();
-            var dimensions = resolution.Text.Split('x', StringSplitOptions.TrimEntries);
+            var display = LaunchDisplay();
+            var dimensions = display.Resolution.Split('x', StringSplitOptions.TrimEntries);
             using var process = BuildPipeline.Launch(output.Text, width: int.Parse(dimensions[0]), height: int.Parse(dimensions[1]),
-                car: CarId, borderless: windowMode.SelectedIndex == 1, course: CourseId, game: !QuickRaceSelected && !VrSelected, vr: VrSelected,
-                desktopFps: SelectedNumber(desktopFps), vrRefresh: SelectedNumber(vrRefresh), vrScale: SelectedNumber(vrScale));
-            status.Text = VrSelected ? "Easy Ride launched in OpenXR." : QuickRaceSelected ? $"Quick Race launched — {course.Text}, {car.Text}." : "Game launched.";
+                car: CarId, borderless: display.Borderless, course: VrSelected ? SelectedVrCourse.Id : CourseId, game: launchMode.SelectedIndex == 0, vr: VrSelected, style: SelectedStyle,
+                desktopFps: display.DesktopFps, vrRefresh: SelectedNumber(vrRefresh), vrScale: SelectedNumber(vrScale),
+                n64LowRaster: N64ModeSelected && n64RasterAvailable && n64LowRaster.Checked, remasteredHour: timeOfDay.SelectedIndex,
+                remasteredMsaa: SelectedNumber(msaa), remasteredWeather: GameContent.WeatherIds[weather.SelectedIndex],
+                remasteredCamera: GameContent.CameraIds[camera.SelectedIndex], cameraLook: cameraLook.Checked, maxCameraDistance: cameraDistance.Value);
+            status.Text = N64ModeSelected || RemasteredSelected ? $"{courseTitle.Text} launched." : VrSelected ? $"{SelectedVrCourse.Name} launched in OpenXR." : QuickRaceSelected ? $"Quick Race launched — {course.Text}, {car.Text}." : "Game launched.";
             AppendLog(status.Text);
         }
         catch (Exception error) { ShowError(error); }
@@ -206,7 +283,7 @@ internal sealed class MainForm : Form
         if (active != null) return;
         using var cancellation = new CancellationTokenSource();
         active = cancellation;
-        fields.Enabled = verify.Enabled = build.Enabled = launch.Enabled = launchMode.Enabled = inspect.Enabled = controller.Enabled = resolution.Enabled = car.Enabled = course.Enabled = windowMode.Enabled = false;
+        fields.Enabled = verify.Enabled = build.Enabled = launch.Enabled = launchMode.Enabled = inspect.Enabled = controller.Enabled = resolution.Enabled = car.Enabled = course.Enabled = visualStyle.Enabled = vrCourse.Enabled = windowMode.Enabled = false;
         cancel.Enabled = true;
         progress.Style = ProgressBarStyle.Marquee;
         status.Text = compile ? "Building native game…" : "Verifying ROM…";
@@ -240,22 +317,75 @@ internal sealed class MainForm : Form
         }
     }
 
+    private DisplaySettings ReadDisplay() => new(resolution.Text, windowMode.SelectedIndex == 1, SelectedNumber(desktopFps));
+
+    private DisplaySettings LaunchDisplay() => editingProfile == LaunchProfile
+        ? ReadDisplay() : profiles.GetValueOrDefault(LaunchProfile) ?? new DisplaySettings();
+
+    private void SelectRaceProfile()
+    {
+        visualStyle.SelectedIndex = QuickRaceSelected && GameContent.SupportsEnhancedStyles(CourseId, CarId) ? (int)preferredStyle : 0;
+        graphicsProfile.SelectedItem = LaunchProfile;
+        RefreshLaunch();
+    }
+
+    private void SelectGraphicsProfile()
+    {
+        if (graphicsProfile.SelectedIndex < 0 || editingProfile == graphicsProfile.Text) return;
+        if (editingProfile != null) profiles[editingProfile] = ReadDisplay();
+        editingProfile = graphicsProfile.Text;
+        var display = profiles.GetValueOrDefault(editingProfile) ?? new DisplaySettings();
+        resolution.SelectedItem = resolution.Items.Contains(display.Resolution) ? display.Resolution : "1920 x 1080";
+        windowMode.SelectedIndex = display.Borderless ? 1 : 0;
+        RestoreNumber(desktopFps, display.DesktopFps);
+    }
+
     private void LoadSettings()
     {
         output.Text = Path.Combine(AppContext.BaseDirectory, "user-builds");
         try
         {
             if (!File.Exists(settingsFile)) return;
-            var settings = JsonSerializer.Deserialize<LauncherSettings>(File.ReadAllText(settingsFile));
+            using var json = JsonDocument.Parse(File.ReadAllText(settingsFile));
+            var settings = json.RootElement.Deserialize<LauncherSettings>();
             if (settings == null) return;
+            var savedN64Mode = json.RootElement.TryGetProperty(nameof(settings.N64Mode), out _) ? settings.N64Mode
+                : json.RootElement.TryGetProperty("Remastered", out var legacyMode) && legacyMode.ValueKind == JsonValueKind.True;
             rom.Text = settings.RomPath;
             if (!string.IsNullOrWhiteSpace(settings.OutputPath)) output.Text = settings.OutputPath;
             car.SelectedItem = car.Items.Cast<CarChoice>().FirstOrDefault(c => c.Id == settings.Car) ?? car.Items[0];
             course.SelectedItem = course.Items.Cast<GameCourse>().FirstOrDefault(c => c.Id == settings.Course) ?? course.Items[0];
-            launchMode.SelectedIndex = settings.EasyRideVr ? 2 : settings.QuickRace ? 1 : 0;
-            if (resolution.Items.Contains(settings.Resolution)) resolution.SelectedItem = settings.Resolution;
-            windowMode.SelectedIndex = settings.Borderless ? 1 : 0;
-            RestoreNumber(desktopFps, settings.DesktopFps); RestoreNumber(vrRefresh, settings.VrRefresh); RestoreNumber(vrScale, settings.VrScale);
+            vrCourse.SelectedItem = vrCourse.Items.Cast<GameCourse>().FirstOrDefault(c => c.Id == settings.VrCourse) ?? vrCourse.Items[0];
+            var fallback = settings.GraphicsProfiles == null
+                ? new DisplaySettings(settings.Resolution, settings.Borderless, settings.DesktopFps)
+                : new DisplaySettings();
+            foreach (string name in graphicsProfile.Items)
+            {
+                var oldKey = name switch { "Original" => "Quick Race", "N64 Mode" => "N64 mode", _ => name };
+                profiles[name] = settings.GraphicsProfiles?.GetValueOrDefault(name) ?? settings.GraphicsProfiles?.GetValueOrDefault(oldKey) ?? fallback;
+            }
+            editingProfile = null;
+            var legacyEnhanced = settings.QuickRaceStyle == null && (settings.RemasteredMode || savedN64Mode);
+            if (legacyEnhanced)
+            {
+                // The former standalone modes always launched this combination,
+                // even when another car and course were saved for Quick Race.
+                car.SelectedIndex = 0; course.SelectedItem = GameContent.Course(GameContent.DefaultCourse);
+                preferredStyle = settings.RemasteredMode ? RaceStyle.Remastered : RaceStyle.N64;
+            }
+            else
+                preferredStyle = settings.QuickRaceStyle switch { "Remastered" => RaceStyle.Remastered, "N64" => RaceStyle.N64, _ => RaceStyle.Original };
+            launchMode.SelectedIndex = legacyEnhanced ? 1 : settings.EasyRideVr ? 2 : settings.QuickRace ? 1 : 0;
+            SelectRaceProfile();
+            n64LowRaster.Checked = settings.N64LowRaster;
+            RestoreNumber(msaa, settings.RemasteredMsaa);
+            weather.SelectedIndex = Math.Max(0, Array.IndexOf(GameContent.WeatherIds, settings.RemasteredWeather));
+            camera.SelectedIndex = Math.Max(0, Array.IndexOf(GameContent.CameraIds, settings.RemasteredCamera));
+            cameraLook.Checked = settings.CameraLook;
+            cameraDistance.Value = Math.Clamp(settings.MaxCameraDistance, cameraDistance.Minimum, cameraDistance.Maximum);
+            timeOfDay.SelectedIndex = settings.RemasteredHour is >= 0 and < 24 ? settings.RemasteredHour : 12;
+            SelectGraphicsProfile();
+            RestoreNumber(vrRefresh, settings.VrRefresh); RestoreNumber(vrScale, settings.VrScale);
         }
         catch (Exception error) when (error is IOException or JsonException or UnauthorizedAccessException)
         { AppendLog("Could not load settings: " + error.Message); }
@@ -263,8 +393,11 @@ internal sealed class MainForm : Form
 
     private void SaveSettings()
     {
-        try { BuildPipeline.AtomicWrite(settingsFile, JsonSerializer.Serialize(new LauncherSettings(rom.Text, output.Text, CarId, resolution.Text, windowMode.SelectedIndex == 1, CourseId, QuickRaceSelected, VrSelected,
-            SelectedNumber(desktopFps), SelectedNumber(vrRefresh), SelectedNumber(vrScale)), BuildPipeline.JsonOptions)); }
+        if (editingProfile != null) profiles[editingProfile] = ReadDisplay();
+        var display = LaunchDisplay();
+        try { BuildPipeline.AtomicWrite(settingsFile, JsonSerializer.Serialize(new LauncherSettings(rom.Text, output.Text, CarId, display.Resolution, display.Borderless, CourseId, QuickRaceSelected, VrSelected,
+            display.DesktopFps, SelectedNumber(vrRefresh), SelectedNumber(vrScale), SelectedVrCourse.Id, N64ModeSelected, n64LowRaster.Checked, RemasteredSelected, profiles, timeOfDay.SelectedIndex,
+            SelectedNumber(msaa), GameContent.WeatherIds[weather.SelectedIndex], GameContent.CameraIds[camera.SelectedIndex], cameraLook.Checked, cameraDistance.Value, preferredStyle.ToString()), BuildPipeline.JsonOptions)); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         { AppendLog("Could not save portable settings: " + error.Message); }
     }
@@ -273,36 +406,62 @@ internal sealed class MainForm : Form
     {
         if (car.SelectedItem == null || course.SelectedItem == null) return;
         var quick = QuickRaceSelected;
+        var enhanced = N64ModeSelected || RemasteredSelected;
         quickSettings.Visible = quick;
+        var styleAvailable = GameContent.SupportsEnhancedStyles(CourseId, CarId);
+        visualStyle.Enabled = quick && styleAvailable && active == null;
+        vrCourse.Visible = VrSelected;
+        vrCourse.Enabled = active == null;
         launch.Text = VrSelected ? "Launch VR" : quick ? "Launch Quick Race" : "Launch Game";
-        courseTitle.Text = VrSelected ? "Easy Ride VR" : quick ? course.Text : "Game startup";
-        preview.AccessibleName = VrSelected ? "4WD on Easy Ride" : quick ? $"{car.Text} on {course.Text}" : "Game startup preview";
-        session.Text = VrSelected ? "4WD • Bonnet view • F2 or right stick to recenter." : quick ? "Three laps against three opponents." : "Start the game and choose your car and class in the game menus.";
+        courseTitle.Text = enhanced ? $"{course.Text} ({visualStyle.Text})" : VrSelected ? $"{SelectedVrCourse.Name} VR" : quick ? course.Text : "Game startup";
+        preview.AccessibleName = enhanced ? $"{visualStyle.Text} rally 4WD on {course.Text}" : VrSelected ? $"4WD on {SelectedVrCourse.Name}" : quick ? $"{car.Text} on {course.Text}" : "Game startup preview";
+        session.Text = quick && !styleAvailable ? "Select the 4WD to use N64 Mode or Remastered in Quick Race." : VrSelected ? "4WD • Bonnet view • F2 or right stick to recenter." : quick ? "Three laps against three opponents." : "Start the game and choose your car and class in the game menus.";
         controller.Enabled = active == null && !string.IsNullOrWhiteSpace(output.Text);
         BuildRecord? record = null;
         try { if (!string.IsNullOrWhiteSpace(output.Text)) record = BuildPipeline.LastSuccess(output.Text); }
         catch (Exception error) when (error is IOException or InvalidDataException or JsonException or ArgumentException or UnauthorizedAccessException)
         { AppendLog("Build unavailable: " + error.Message); }
         inspect.Enabled = active == null && record != null;
-        var compatible = record != null && (record.ContentVersion >= 1 || (CarId == "4wd" && windowMode.SelectedIndex == 0)) &&
+        var compatible = record != null && (record.ContentVersion >= 1 || (CarId == "4wd" && !LaunchDisplay().Borderless)) &&
             record.ContentVersion >= GameContent.Course(CourseId).MinimumContentVersion;
         var stage = record == null ? null : Path.Combine(Path.GetFullPath(output.Text), "builds", record.Directory);
-        var courseAvailable = stage != null && File.Exists(Path.Combine(GameContent.AssetDirectory(stage, CourseId), "world.srfworld"));
-        launch.Enabled = active == null && (VrSelected ? record?.ContentVersion >= 28 : quick ? compatible && courseAvailable : record?.ContentVersion >= 2);
+        var courseAvailable = stage != null && File.Exists(Path.Combine(GameContent.AssetDirectory(stage, VrSelected ? SelectedVrCourse.Id : CourseId), "world.srfworld"));
+        launch.Enabled = active == null && (enhanced ? record?.ContentVersion >= GameContent.StyleVersion(CourseId, SelectedStyle) && courseAvailable : VrSelected ? record?.ContentVersion >= SelectedVrCourse.VrVersion && courseAvailable : quick ? compatible && courseAvailable : record?.ContentVersion >= 2);
+        n64RasterAvailable = record?.ContentVersion >= GameContent.N64RasterVersion;
+        n64LowRaster.Enabled = active == null && editingProfile == "N64 Mode" && n64RasterAvailable;
+        bool remasteredGraphics = active == null && editingProfile == "Remastered" && record?.ContentVersion >= GameContent.SunLightingVersion;
+        bool nightRace = quick && (CourseId is "night-owl" or "night-cruise" or "harbor-city");
+        timeOfDay.Enabled = remasteredGraphics && !nightRace;
+        msaa.Enabled = weather.Enabled = remasteredGraphics && record?.ContentVersion >= GameContent.AtmosphereVersion;
+        camera.Enabled = cameraLook.Enabled = remasteredGraphics && record?.ContentVersion >= GameContent.CameraVersion;
+        cameraDistance.Enabled = remasteredGraphics && record?.ContentVersion >= GameContent.IsometricVersion;
+        bool needsIsometricBuild = camera.Text == "Isometric" && record?.ContentVersion < GameContent.IsometricVersion;
+        if (RemasteredSelected && needsIsometricBuild) launch.Enabled = false;
+        lightingHint.Text = needsIsometricBuild ? "Rebuild from Game files to use Isometric."
+            : nightRace && remasteredGraphics && CourseId == "harbor-city" ? "Harbor City starts at night and brightens on the final lap."
+            : nightRace && remasteredGraphics && CourseId == "night-cruise" ? "Night Cruise starts at sunset and darkens during the race."
+            : nightRace && remasteredGraphics ? "Night Owl always runs at night. Weather and camera controls are available."
+            : record?.ContentVersion >= GameContent.CameraVersion ? "C switches views. Enable camera control to scroll to zoom. Right-drag or move the right stick to look around in the other views. F2 or a right stick click recenters."
+            : "Build the game from Game files to enable all Remastered graphics options.";
+        graphicsProfile.Enabled = active == null;
         availability.Text = record == null ? "" : $"Built {record.BuiltAt.ToLocalTime():d MMM yyyy}";
         if (active == null)
             status.Text = record == null ? "Build the game from Game files to begin."
-                : !launch.Enabled && VrSelected ? "Rebuild from Game files to enable Easy Ride VR."
+                : RemasteredSelected && needsIsometricBuild ? "Rebuild from Game files to use Isometric."
+                : !launch.Enabled && enhanced ? $"Rebuild from Game files to enable {courseTitle.Text}."
+                : !launch.Enabled && VrSelected ? $"Rebuild from Game files to enable {SelectedVrCourse.Name} VR."
                 : !launch.Enabled ? (quick ? "Rebuild from Game files to use this race selection." : "Choose Quick Race or rebuild for Normal mode.")
                 : !quick && record.ContentVersion < GameContent.OriginalBootVersion ? "Rebuild for the original Nintendo splash and menus."
                 : "Ready to launch.";
         string? path = null;
         if (stage != null && record != null)
         {
-            if (VrSelected) path = Path.Combine(stage, "preview-easy-ride-4wd.png");
+            if (enhanced) path = record.ContentVersion >= GameContent.StyleVersion(CourseId, SelectedStyle) && courseAvailable
+                ? Path.Combine(stage, GameContent.StylePreview(CourseId, SelectedStyle, record.ContentVersion)) : null;
+            else if (VrSelected && courseAvailable) path = Path.Combine(stage, $"preview-{SelectedVrCourse.Id}-4wd.png");
             else if (quick && compatible && courseAvailable)
                 path = Path.Combine(stage, record.ContentVersion >= 2 ? $"preview-{CourseId}-{CarId}.png" : $"preview-{CarId}.png");
-            else if (!quick && record.ContentVersion >= GameContent.OriginalBootVersion)
+            else if (!quick && !VrSelected && record.ContentVersion >= GameContent.OriginalBootVersion)
                 path = Path.Combine(stage, "native-smoke.png");
         }
         if (path != previewPath)
@@ -311,7 +470,7 @@ internal sealed class MainForm : Form
             try { if (path != null && File.Exists(path)) { using var image = Image.FromFile(path); preview.Image = new Bitmap(image); } }
             catch (Exception error) when (error is IOException or ArgumentException or OutOfMemoryException) { AppendLog("Preview unavailable: " + error.Message); }
         }
-        previewHint.Text = preview.Image == null ? "Build from your ROM to see a preview." : VrSelected ? "4WD • Easy Ride" : quick ? $"{car.Text} • {course.Text}" : "Original title screen";
+        previewHint.Text = preview.Image == null ? "Build from your ROM to see a preview." : VrSelected ? $"4WD • {SelectedVrCourse.Name}" : quick ? $"{car.Text} • {course.Text}" : "Original title screen";
     }
 
     protected override void Dispose(bool disposing) { if (disposing) preview.Image?.Dispose(); base.Dispose(disposing); }

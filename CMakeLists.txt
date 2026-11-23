@@ -164,13 +164,16 @@ if(SRF_GENERATED_DATA)
         add_dependencies(srf_openxr_tests srf_preview)
         add_test(NAME openxr_drive COMMAND srf_openxr_tests)
         set_tests_properties(openxr_drive PROPERTIES SKIP_RETURN_CODE 77)
-        set(SRF_XRSIM_DLL "" CACHE FILEPATH "64-bit xr-sim runtime DLL for the Easy Ride replay test")
+        set(SRF_XRSIM_DLL "" CACHE FILEPATH "64-bit xr-sim runtime DLL for the 4WD replay tests")
         if(SRF_XRSIM_DLL)
             find_package(Python3 REQUIRED COMPONENTS Interpreter)
             add_test(NAME xrsim_easy_ride_replay COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/xrsim_replay.py" "$<TARGET_FILE:srf_preview>"
                 "${SRF_GENERATED_DATA}/world.srfworld" "${SRF_XRSIM_DLL}")
-            set_tests_properties(xrsim_easy_ride_replay PROPERTIES RUN_SERIAL TRUE SKIP_RETURN_CODE 77 TIMEOUT 480)
+            add_test(NAME xrsim_aqua_tunnel_replay COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/xrsim_replay.py" "$<TARGET_FILE:srf_preview>"
+                "${SRF_GENERATED_DATA}/aqua-tunnel/world.srfworld" "${SRF_XRSIM_DLL}" --course aqua-tunnel)
+            set_tests_properties(xrsim_easy_ride_replay xrsim_aqua_tunnel_replay PROPERTIES RUN_SERIAL TRUE SKIP_RETURN_CODE 77 TIMEOUT 480)
         endif()
         add_executable(srf_stunt_occlusion_tests tests/stunt_occlusion_tests.cpp src/audio_device.cpp src/gamepad.cpp src/game_frontend.cpp)
         target_include_directories(srf_stunt_occlusion_tests PRIVATE "${SRF_GENERATED_DATA}")

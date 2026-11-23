@@ -113,7 +113,7 @@ struct Gamepad::Impl {
         }
         return disconnected;
     }
-    GamepadInput poll(bool focused) {
+    GamepadInput poll(bool focused,bool camera_look) {
         GamepadInput result;
         result.disconnected=refresh();
         if(!pad)return result;
@@ -135,6 +135,16 @@ struct Gamepad::Impl {
         // Attach/focus changes must not turn held Start/Back into actions or
         // resume with a stale throttle. Require one neutral observation first.
         if(!armed) {armed=neutral;return result;}
+        if(camera_look) {
+            auto look=[&](SDL_GamepadAxis id) {
+                if(std::find(bindings.axes.begin(),bindings.axes.end(),id)!=bindings.axes.end())return 0.f;
+                const int raw=std::clamp(int(SDL_GetGamepadAxis(pad,id)),-32767,32767);
+                const float amount=float(std::max(0,std::abs(raw)-bindings.deadzone))/(32767-bindings.deadzone);
+                return raw<0?-amount:amount;
+            };
+            result.look_x=look(SDL_GAMEPAD_AXIS_RIGHTX);
+            result.look_y=look(SDL_GAMEPAD_AXIS_RIGHTY);
+        }
         if(proportional)result.steering_q15=static_cast<std::int16_t>(target);
         if(left)result.requested|=1;
         if(right)result.requested|=2;
@@ -149,7 +159,7 @@ struct Gamepad::Impl {
 };
 Gamepad::Gamepad(const std::filesystem::path& config):impl_(std::make_unique<Impl>(config)) {}
 Gamepad::~Gamepad()=default;
-GamepadInput Gamepad::poll(bool focused) {return impl_->poll(focused);}
+GamepadInput Gamepad::poll(bool focused,bool camera_look) {return impl_->poll(focused,camera_look);}
 std::uint16_t Gamepad::poll_frontend(bool focused) {
     impl_->refresh();
     if(!impl_->pad || !focused) {impl_->frontend_released=0;return 0;}

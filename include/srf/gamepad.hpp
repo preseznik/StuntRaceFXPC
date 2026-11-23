@@ -11,6 +11,7 @@ struct GamepadInput {
     bool pause=false,restart=false,disconnected=false,recenter=false;
     // Present only for an armed proportional stick: -32767 left, +32767 right.
     std::optional<std::int16_t> steering_q15;
+    float look_x=0,look_y=0;
 };
 // Keyboard steering takes priority over the stick and uses original full input.
 GamepadInput combine_player_input(std::uint16_t keyboard,GamepadInput gamepad);
@@ -24,7 +25,7 @@ public:
     ~Gamepad();
     Gamepad(const Gamepad&)=delete;
     Gamepad& operator=(const Gamepad&)=delete;
-    GamepadInput poll(bool focused);
+    GamepadInput poll(bool focused,bool camera_look=false);
     MenuButton poll_menu(bool focused);
     std::uint16_t poll_frontend(bool focused); // Held buttons in SNES controller bit order.
     CourseMapButtons poll_course_map(bool focused);

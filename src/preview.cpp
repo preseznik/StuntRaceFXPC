@@ -26,6 +26,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -35,6 +36,7 @@
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -60,13 +62,22 @@ struct RenderSprite {
     unsigned table=0,phase=0;
     std::array<float,3> position{};
     float diameter=0;
+    bool wheel=false;
+    float steer=0,spin=0;
 };
 struct RenderVehicle {
     unsigned descriptor=0;
     std::array<float,3> position{};
     std::array<float,9> orientation{1,0,0,0,1,0,0,0,1};
     std::vector<RenderSprite> sprites;
+    bool player=false;
+    float route_follow=0;
 };
+#include "n64_4wd.inc"
+#include "n64_track.inc"
+#include "n64_scenery.inc"
+#include "n64_terrain.inc"
+#include "n64_tiles.inc"
 struct SceneTarget {
     UINT width{},height{};
     ComPtr<ID3D11Texture2D> color;
@@ -84,6 +95,10 @@ struct Constants {
     float cy,sy,cp,sp,aspect,zoom,distance,road_pass;
     float tx,ty,tz,eye_enabled;
     std::array<float,4> eye_offset{},eye_right{},eye_up{},eye_forward{},projection{};
+    std::array<float,4> shadow_origin{},shadow_axis{};
+    std::array<float,4> sun{};
+    float isometric=0,cutaway=0,padding[2]{};
+    std::array<std::array<float,4>,4> car_centers{};
     void set_eye(const SceneEye& eye) {
         const auto [x,y,z,w]=eye.orientation;
         if(!(std::abs(x*x+y*y+z*z+w*w-1)<.001f) ||
@@ -106,7 +121,13 @@ struct BackdropConstants {
     unsigned gradient_y{},sky_rgb555{},texture_weight{};
     float rows_per_pixel{};
     std::array<unsigned,128> row_subtract{};
-    unsigned indexed_textures{},add_fixed{},padding[2]{};
+    unsigned indexed_textures{},add_fixed{};
+    float aqua_meters{},aqua_plane_y{};
+    unsigned sunset_valley{};
+    float sunset_dusk{};
+    float night_lighting=-1; // 0..1 from sunset to night, negative outside the night courses
+    float panorama_fog=-1; // negative for courses without a daylight panorama
+    std::array<float,4> panorama_fog_color{1,1,1,0};
 };
 struct Controls {
     std::size_t model=2, frame=0;
@@ -119,6 +140,29 @@ struct Controls {
     bool race=false,restart=false,paused=false,recenter=false;
 };
 Controls controls;
+enum class RaceCamera { chase,far_chase,cockpit,bonnet,isometric,count };
+struct RemasteredCamera {
+    RaceCamera view=RaceCamera::chase;
+    bool enabled=false,look=false;
+    float heading=0,tilt=0,magnification=1;
+    unsigned max_distance_m=80;
+
+    bool mounted() const {return view==RaceCamera::cockpit || view==RaceCamera::bonnet;}
+    float starting_distance() const {
+        if(view==RaceCamera::isometric)return std::min(5400.f,90.f*max_distance_m);
+        return view==RaceCamera::far_chase?1450.f:900.f;
+    }
+    void scroll(float steps) {
+        const float minimum=mounted()?.65f:starting_distance()/(90.f*max_distance_m);
+        magnification=std::clamp(magnification*std::pow(1.12f,steps),minimum,1.8f);
+    }
+    void center() {heading=tilt=0;magnification=1;}
+    void rotate(float right,float down) {
+        if(view==RaceCamera::isometric)return;
+        heading=mounted()?std::clamp(heading-right,-1.35f,1.35f):std::remainder(heading-right,6.2831853f);
+        tilt=std::clamp(tilt-down,mounted()?-.52f:-1.f,mounted()?.55f:.14f);
+    }
+} race_camera;
 unsigned desktop_fps=0;
 HWND race_hud=nullptr;
 bool race_hud_visible=true,grid_instruments=false;
@@ -162,6 +206,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM key, LPARAM data)
                 ShowWindow(race_hud,race_hud_visible && !grid_instruments?SW_SHOWNA:SW_HIDE);
             }
             if(key==VK_F2 && !(data&(1L<<30))) controls.recenter=true;
+            if(key=='C' && race_camera.enabled && !(data&(1L<<30))) {
+                race_camera.view=static_cast<RaceCamera>((static_cast<int>(race_camera.view)+1)%static_cast<int>(RaceCamera::count));
+                race_camera.center();
+            }
             if(key=='R' && !(data&(1L<<30))) controls.restart=true;
             if(key=='P' && !(data&(1L<<30))) controls.paused=!controls.paused;
             if(key==VK_TAB && !(data&(1L<<30))) controls.wire=!controls.wire;
@@ -179,7 +227,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM key, LPARAM data)
         controls.dragging=true; controls.mouse_x=GET_X_LPARAM(data); controls.mouse_y=GET_Y_LPARAM(data); SetCapture(window); return 0;
     case WM_LBUTTONUP: controls.dragging=false; ReleaseCapture(); return 0;
     case WM_RBUTTONDOWN:
-        if(controls.race) return 0;
+        if(controls.race && !race_camera.look) return 0;
         controls.panning=true; controls.mouse_x=GET_X_LPARAM(data); controls.mouse_y=GET_Y_LPARAM(data); SetCapture(window); return 0;
     case WM_RBUTTONUP: controls.panning=false; ReleaseCapture(); return 0;
     case WM_CAPTURECHANGED: controls.dragging=controls.panning=false; return 0;
@@ -190,6 +238,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM key, LPARAM data)
             controls.mouse_x=GET_X_LPARAM(data); controls.mouse_y=GET_Y_LPARAM(data);
         }
         if (controls.panning) {
+            if(race_camera.look) {
+                race_camera.rotate((GET_X_LPARAM(data)-controls.mouse_x)*.005f,(GET_Y_LPARAM(data)-controls.mouse_y)*.005f);
+                controls.mouse_x=GET_X_LPARAM(data); controls.mouse_y=GET_Y_LPARAM(data);
+                return 0;
+            }
             const float dx=(GET_X_LPARAM(data)-controls.mouse_x)*.006f/controls.zoom;
             const float dy=(GET_Y_LPARAM(data)-controls.mouse_y)*.006f/controls.zoom;
             controls.target_x-=dx*std::cos(controls.yaw)+dy*std::sin(controls.yaw);
@@ -198,14 +251,54 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM key, LPARAM data)
         }
         return 0;
     case WM_MOUSEWHEEL:
+        if(race_camera.look)race_camera.scroll(GET_WHEEL_DELTA_WPARAM(key)/120.f);
         if(controls.race) return 0;
         controls.zoom=std::clamp(controls.zoom*std::pow(1.15f,GET_WHEEL_DELTA_WPARAM(key)/120.f),.3f,controls.world?80.f:8.f); return 0;
     }
     return DefWindowProcW(window,message,key,data);
 }
 
+enum class RaceLook { classic,n64,remastered };
+
+struct RaceWeather {
+    float clouds=0, extinction=0, rain=0, seconds=0; // matches Atmosphere in the material shader
+};
+
 class Renderer {
     DesktopFrameLimit frame_limit;
+    const bool enhanced_scene,n64_mode,aqua_style,sunset_style,night_style,cruise_style,forest_style,sea_style,white_land_style,lake_style,ravine_style,sky_ramp_style,harbor_style;
+    const unsigned start_hour;
+    static std::array<float,4> sun_at(float hour) {
+        const float angle=(hour-6.f)*3.14159265f/12.f;
+        return {std::cos(angle),.8f*std::sin(angle),.6f*std::sin(angle),0};
+    }
+    const bool low_raster;
+    std::array<float,4> sun{};
+    RaceWeather weather;
+    ComPtr<ID3D11Buffer> atmosphere;
+    ComPtr<ID3D11PixelShader> weather_rain_ps;
+    SceneTarget sampled_scene;
+    UINT coverage_samples=1;
+    ComPtr<ID3D11Texture2D> resolved_scene;
+    ComPtr<ID3D11ShaderResourceView> scene_view,n64_tiles;
+    ComPtr<ID3D11PixelShader> display_ps;
+    static constexpr UINT car_shadow_size=512;
+    static constexpr UINT course_shadow_size=4096;
+    ComPtr<ID3D11VertexShader> car_shadow_vs;
+    ComPtr<ID3D11VertexShader> course_shadow_vs;
+    ComPtr<ID3D11PixelShader> course_shadow_ps;
+    ComPtr<ID3D11DepthStencilView> car_shadow_depth;
+    ComPtr<ID3D11DepthStencilView> course_shadow_depth;
+    ComPtr<ID3D11ShaderResourceView> car_shadow_view;
+    ComPtr<ID3D11ShaderResourceView> course_shadow_view;
+    UINT course_shadow_vertices=0,cloud_vertices=0;
+    bool course_shadow_dirty=true;
+    std::vector<std::pair<unsigned,std::size_t>> course_shadow_poses;
+    ComPtr<ID3D11SamplerState> car_shadow_sampler;
+    UINT car_shadow_vertices=0;
+    UINT rival_start=0;
+    std::array<std::array<float,4>,4> car_centers{};
+    std::array<float,4> shadow_origin{},shadow_axis{};
     void present() {
         if(!swapchain)return;
         check(swapchain->Present(frame_limit.capped()?0:1,0),"Present");
@@ -232,7 +325,7 @@ class Renderer {
     ComPtr<ID3D11PixelShader> rain_ps;
     ComPtr<ID3D11Texture2D> rain_mask;
     ComPtr<ID3D11ShaderResourceView> rain_view;
-    bool show_rain=false;
+    bool show_rain=false,ravine_wet=false;
     bool headset_output=false;
     ComPtr<ID3D11PixelShader> bonus_overlay_ps;
     ComPtr<ID3D11Buffer> bonus_overlay_constants;
@@ -257,21 +350,43 @@ class Renderer {
     std::map<std::pair<unsigned,std::size_t>,std::vector<srf::SurfaceOffset>> surface_offsets;
     std::map<std::pair<unsigned,std::size_t>,std::vector<bool>> barrier_backs;
     UINT vertex_count=0,surface_vertex_count=0,world_vertex_count=0,line_count=0,world_line_count=0;
+    UINT two_sided_world_start=0;
     bool vehicle_depth_pass=false;
     std::array<double,3> world_center{};
     double world_radius=1;
-    void upload(const std::vector<GpuVertex>& triangles,const std::vector<GpuVertex>& lines={},UINT surface_count=UINT_MAX) {
-        std::vector<GpuVertex> data=triangles; data.insert(data.end(),lines.begin(),lines.end());
+    ComPtr<ID3D11Buffer> landscape_buffer;
+    UINT landscape_vertex_count=0;
+    void upload_vertices(std::span<const GpuVertex> data,ComPtr<ID3D11Buffer>& buffer) {
         if(data.empty()) throw std::runtime_error("Model has no renderable primitives");
         D3D11_BUFFER_DESC desc{}; desc.ByteWidth=static_cast<UINT>(data.size()*sizeof(GpuVertex));
         desc.Usage=D3D11_USAGE_IMMUTABLE; desc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
         D3D11_SUBRESOURCE_DATA initial{data.data(),0,0};
-        check(device->CreateBuffer(&desc,&initial,vertices.ReleaseAndGetAddressOf()),"Geometry buffer");
+        check(device->CreateBuffer(&desc,&initial,buffer.ReleaseAndGetAddressOf()),"Geometry buffer");
+    }
+    void upload(const std::vector<GpuVertex>& triangles,const std::vector<GpuVertex>& lines={},UINT surface_count=UINT_MAX) {
+        std::vector<GpuVertex> data=triangles; data.insert(data.end(),lines.begin(),lines.end());
+        upload_vertices(data,vertices);
         vertex_count=static_cast<UINT>(triangles.size()); line_count=static_cast<UINT>(lines.size());
         surface_vertex_count=std::min(surface_count,vertex_count);
     }
 public:
-    Renderer(HWND window,ID3D11Device* headset_device=nullptr,unsigned fps=0):frame_limit(fps) {
+    Renderer(HWND window,ID3D11Device* headset_device=nullptr,unsigned fps=0,RaceLook look=RaceLook::classic,bool raster_240=false,unsigned hour=12,unsigned msaa=0,RaceWeather conditions={},srf::CourseId course=srf::CourseId::easy_ride):
+        frame_limit(fps),enhanced_scene(look!=RaceLook::classic),n64_mode(look==RaceLook::n64),
+        aqua_style(enhanced_scene && course==srf::CourseId::aqua_tunnel),
+        sunset_style(enhanced_scene && course==srf::CourseId::sunset_valley),
+        night_style(enhanced_scene && (course==srf::CourseId::night_owl || course==srf::CourseId::night_cruise || course==srf::CourseId::harbor_city)),
+        cruise_style(enhanced_scene && course==srf::CourseId::night_cruise),
+        forest_style(enhanced_scene && course==srf::CourseId::kings_forest),
+        sea_style(enhanced_scene && course==srf::CourseId::sea_breeze),
+        white_land_style(enhanced_scene && course==srf::CourseId::white_land),
+        lake_style(enhanced_scene && course==srf::CourseId::lake_side),
+        ravine_style(enhanced_scene && course==srf::CourseId::big_ravine),
+        sky_ramp_style(enhanced_scene && course==srf::CourseId::sky_ramp),
+        harbor_style(enhanced_scene && course==srf::CourseId::harbor_city),start_hour(hour),low_raster(raster_240),weather(conditions) {
+        if(look==RaceLook::remastered) {
+            // East at 06:00, west at 18:00. Tilt the orbit toward the coast at noon.
+            sun=sun_at(cruise_style ? 17.5f : night_style ? 0.f : float(hour));
+        }
         headset_output=headset_device!=nullptr;
         D3D_FEATURE_LEVEL level;
         const D3D_FEATURE_LEVEL requested[]{D3D_FEATURE_LEVEL_11_0};
@@ -293,17 +408,94 @@ public:
             if (SUCCEEDED(hr)) break;
         }
         check(hr,"D3D11 device");
-        constexpr char shader[]=R"(
+        constexpr char shader[]=
+#include "n64_materials.hlsl.inc"
+R"(
 cbuffer View : register(b0) { float cy,sy,cp,sp,aspect,zoom,distance,road_pass; float3 target; float eye_enabled;
-    float4 eye_offset,eye_right,eye_up,eye_forward,projection; };
-cbuffer Environment : register(b1) { float4 crop; uint layer,blank,fixed_color,math_layers; uint gradient_y,sky_color,texture_weight; float rows_per_pixel; uint4 row_subtract[32]; uint indexed_textures,add_fixed; };
+    float4 eye_offset,eye_right,eye_up,eye_forward,projection,shadow_origin,shadow_axis,sun;
+    float isometric,cutaway; float2 view_padding; float4 car_centers[4]; };
+cbuffer Environment : register(b1) { float4 crop; uint layer,blank,fixed_color,math_layers; uint gradient_y,sky_color,texture_weight; float rows_per_pixel; uint4 row_subtract[32]; uint indexed_textures,add_fixed; float aqua_meters,aqua_plane_y; uint sunset_valley; float sunset_dusk; float night_lighting; float panorama_fog; float4 panorama_fog_color; };
 Texture2DArray<float4> tiles:register(t0);
 Texture2DArray<float4> dusk_tiles:register(t3);
 Texture2DArray<uint> palette_indices:register(t4);
 Texture2D<uint> colors:register(t2);
 SamplerState tile_sampler:register(s0);
 struct Vertex { float3 position:POSITION; float3 color:COLOR; float3 uv:TEXCOORD; float painter_depth:TEXCOORD1; float4 road:TEXCOORD2; };
-struct Pixel { float4 position:SV_POSITION; float3 color:COLOR; float3 uv:TEXCOORD; };
+#ifdef REMASTERED_LIGHT
+Texture2D<float> car_depth:register(t8);
+Texture2D<float> course_depth:register(t9);
+SamplerComparisonState shadow_sampler:register(s1);
+// The fixed sun and normalized course share a single world-anchored map.
+// Its projection is independent of the race camera and its cutaway.
+static const float course_half_width=1.6;
+float3 course_shadow_position(float3 position) {
+    float3 right=normalize(float3(sun.z,0,-sun.x));
+    return float3(dot(position,right)/course_half_width,
+                  dot(position,cross(sun.xyz,right))/course_half_width,
+                  .5+.5*dot(position,sun.xyz)/course_half_width);
+}
+struct CourseCaster {float4 position:SV_POSITION; float3 uv:TEXCOORD;};
+CourseCaster course_shadow_vertex(Vertex v) {
+    CourseCaster o;
+    o.position=float4(course_shadow_position(v.position),1);
+    o.uv=v.uv;
+    return o;
+}
+void course_shadow_pixel(CourseCaster p) {
+    if(p.uv.z>0) clip(tiles.SampleLevel(tile_sampler,p.uv,0).a-.5);
+}
+float course_sunlight(float3 position,float3 normal) {
+    if(sun.y<=.01)return 1;
+    float3 p=course_shadow_position(position);
+    if(any(abs(p.xy)>=1) || p.z<=0 || p.z>=1)return 1;
+    uint w,h;
+    course_depth.GetDimensions(w,h);
+    // Bias the receiver by the depth it can span across a comparison texel.
+    float cosine=abs(dot(normal,sun.xyz));
+    float slope=sqrt(saturate(1-cosine*cosine))/max(.08,cosine);
+    float bias=(.15+1.5*slope)/w;
+    return course_depth.SampleCmpLevelZero(shadow_sampler,p.xy*float2(.5,-.5)+.5,p.z+bias);
+}
+float4 car_shadow_position(float3 position) {
+    float3 offset=(position-shadow_origin.xyz)*shadow_origin.w; // metres from chassis
+    // Below the horizon use an overhead contact shadow.
+    float3 direction=sun.y>.01 ? sun.xyz : float3(0,1,0);
+    float3 right=sun.y>.01 ? normalize(float3(direction.z,0,-direction.x)) : float3(1,0,0);
+    float3 up=cross(direction,right);
+    return float4(dot(offset,right)/5,dot(offset,up)/5,.5+dot(offset,direction)/12,1);
+}
+float4 car_shadow_vertex(float3 position:POSITION):SV_POSITION {
+    return car_shadow_position(position);
+}
+float car_shadow_light(float3 projected) {
+    if(shadow_origin.w==0 || any(abs(projected.xy)>1) || projected.z>=1) return 1;
+    float2 uv=projected.xy*float2(.5,-.5)+.5;
+    float metersBehind=(.5-projected.z)*12;
+    float daylight=smoothstep(.01,.16,sun.y);
+    float opacity=lerp(.34*(1-smoothstep(1,3,metersBehind)),.66,daylight);
+    // A small world-space filter preserves the wheel gaps at contact and softens
+    // the outline as the receiver gets farther from the vehicle.
+    float radius=clamp(.018+.012*metersBehind,.012,.075)/10;
+    float visible=0;
+    [unroll] for(int y=-1;y<=1;++y) [unroll] for(int x=-1;x<=1;++x)
+        visible+=car_depth.SampleCmpLevelZero(shadow_sampler,uv+float2(x,y)*radius,
+                                               max(.0001,projected.z+.001));
+    return 1-opacity*(1-.71*cloud_cover)*(1-visible/9);
+}
+#endif
+struct Pixel { float4 position:SV_POSITION; float3 color:COLOR; float3 uv:TEXCOORD;
+#ifdef ENHANCED_SCENE
+    float3 shadow:TEXCOORD3;
+#endif
+#ifdef REMASTERED_LIGHT
+    float3 world_pos:TEXCOORD4;
+    float depth_m:TEXCOORD5;
+#endif
+#ifdef N64_MODE
+    float3 view_pos:TEXCOORD4;
+    float fog:TEXCOORD5;
+#endif
+};
 float3 camera_position(float3 position) {
     float3 p=position-target;
     p=float3(cy*p.x+sy*p.z,p.y,-sy*p.x+cy*p.z);
@@ -330,9 +522,142 @@ Pixel vertex_main(Vertex v) {
         }
     }
     if(road_pass!=0 && painter>0) o.position.z=.0005*p.z/painter;
+#ifdef REMASTERED_LIGHT
+    if(isometric) o.position=float4(p.x*zoom/(aspect*distance),p.y*zoom/distance,1-p.z/4,1);
+    o.world_pos=v.position;
+    o.depth_m=p.z*sun.w;
+    o.shadow=car_shadow_position(v.position).xyz;
+#endif
+#ifdef N64_MODE
+    float3 offset=(v.position-shadow_origin.xyz)*shadow_origin.w;
+    o.shadow=float3(dot(offset.xz,shadow_axis.xy),dot(offset.xz,shadow_axis.zw),offset.y);
+    o.view_pos=p;
+    o.fog=.68*smoothstep(85,340,p.z*shadow_origin.w);
+#endif
     o.color=v.color; o.uv=v.uv; return o;
 }
+float3 course_color_math(float3 rgb,float row_y) {
+#ifdef REMASTERED_LIGHT
+    if(night_lighting>=0 && rows_per_pixel>0)return rgb; // World-space headlights replace Night Owl's screen-row mask.
+#endif
+    if((math_layers&1) || rows_per_pixel>0) {
+        uint color_word=fixed_color;
+        if(rows_per_pixel>0) {
+            uint row=min(127u,(uint)(row_y*rows_per_pixel));
+            color_word=row_subtract[row/4][row%4];
+        }
+        float3 fixed_rgb=float3(color_word&31,(color_word>>5)&31,(color_word>>10)&31);
+#ifdef REMASTERED_LIGHT
+        if(aqua_meters || sunset_valley || night_lighting>=0 || add_fixed)return saturate(rgb+(add_fixed?fixed_rgb:-fixed_rgb)/31);
+#endif
+        rgb=clamp(round(rgb*31)+(add_fixed?fixed_rgb:-fixed_rgb),0,31)/31;
+    }
+    return rgb;
+}
+#ifdef ENHANCED_SCENE
+float3 aqua_color(float3 rgb,float meters,float row_y) {
+    if(layer && !blank) {
+        float transmission=exp2(-.012*max(0,meters-4));
+        rgb=lerp(float3(.035,.27,.52),rgb*float3(.77,.94,1.03),transmission);
+    }
+    return course_color_math(rgb,row_y);
+}
+#endif
 float4 pixel_main(Pixel p):SV_TARGET {
+#ifdef N64_MODE
+    // A soft chassis shadow on the road also shades painted lines and chequers.
+    // Vertical separation fades it out when the 4WD goes over a crest.
+    float contact=(1-smoothstep(.55,1.12,length(p.shadow.xy/float2(2.15,2.40))))*
+                  (1-smoothstep(.6,2.25,abs(p.shadow.z)));
+    float light=shadow_origin.w>0 ? 1-.60*contact : 1;
+#endif
+#ifdef REMASTERED_LIGHT
+    if(cutaway) {
+        // Use one screen-space coverage pattern across overlapping roof layers.
+        // Surviving fragments write ordinary depth, including the soft outer rim.
+        float coverage=1;
+        [unroll] for(int i=0;i<4;++i) {
+            float3 d=(p.world_pos-car_centers[i].xyz)*sun.w;
+            float forward=-sy*d.x+cy*d.z;
+            if(car_centers[i].w && d.y>1.2 && sp*d.y+cp*forward < -1.5) {
+                float2 plane=float2(cy*d.x+sy*d.z,cp*d.y-sp*forward);
+                coverage=min(coverage,lerp(.20,1,smoothstep(2.6,4.6,length(plane))));
+            }
+        }
+        uint2 xy=(uint2)p.position.xy;
+        uint2 bits=xy&1, high=(xy>>1)&1;
+        uint threshold=4*(2*(bits.x^bits.y)+bits.y)+2*(high.x^high.y)+high.y;
+        clip(coverage-(threshold+.5)/16);
+    }
+    float light=car_shadow_light(p.shadow);
+    // Screen-space derivatives give the visible face normal in world coordinates,
+    // including moving opponents and the generated road, banks and chassis.
+    float3 area=cross(ddx(p.world_pos),ddy(p.world_pos));
+    float len2=dot(area,area);
+    float3 normal=len2>1e-24 ? area*rsqrt(max(len2,1e-24)) : float3(0,1,0);
+    // Sunset's source palette already darkens the canyon and its animals.
+    float3 ambient=ambient_color(sun.xyz)+sunset_dusk*float3(.13,.12,.12);
+    float3 direct=sun_color(sun.xyz)*smoothstep(-.08,.17,sun.y)*(1-.89*cloud_cover)*course_sunlight(p.world_pos,normal);
+    if(aqua_meters && layer) {
+        ambient=lerp(ambient,float3(.44,.57,.74),.65);
+        direct*=.38;
+    }
+    float3 lighting=ambient*(.83+.17*saturate(normal.y))+direct*saturate(dot(normal,sun.xyz))*.63;
+    if(night_lighting>=0) {
+        // The 4WD headlights stay on the road as the player turns or changes camera.
+        float3 offset=(p.world_pos-shadow_origin.xyz)*sun.w;
+        float ahead=dot(offset.xz,shadow_axis.zw);
+        float side=dot(offset.xz,shadow_axis.xy);
+        float width=1.2+.18*max(ahead,0);
+        float beam=(1-smoothstep(.3,1,abs(abs(side)-.85)/width))
+                  *smoothstep(.5,3,ahead)*(1-smoothstep(18,65,ahead))
+                  *(1-smoothstep(1.5,6,abs(offset.y)));
+        lighting+=night_lighting*(float3(.14,.14,.15)+beam*float3(.94,.83,.64));
+    }
+    if(p.uv.z<0) {
+        float3 albedo=scene_material(p.uv,p.color);
+        // Native-colored road already carries the forest palette fog.
+        if(panorama_fog>0 && p.uv.z>-20.5)albedo=lerp(albedo,panorama_fog_color.rgb,panorama_fog);
+        // At grazing angles wet asphalt catches the color of the low cloud deck.
+        float wet=rain_strength*(step(-1.5,p.uv.z)*step(p.uv.z,-.5)+.45*step(abs(p.uv.z+21),.1));
+        float3 lit=albedo*lighting*(1-.36*wet);
+        if(wet>0) {
+            float3 eye=target+distance*float3(sy*cp,-sp,-cy*cp);
+            float grazing=1-saturate(dot(normal,normalize(eye-p.world_pos)));
+            float patches=.6+.4*grain(p.uv.xy*.29);
+            lit=lerp(lit,mist_color(sun.xyz),.50*wet*patches*pow(grazing,3));
+        }
+        if(abs(p.uv.z+4)<.1) {
+            float3 eye=target+distance*float3(sy*cp,-sp,-cy*cp);
+            float3 reflection=reflect(-sun.xyz,normal);
+            lit+=direct*.44*pow(saturate(dot(reflection,normalize(eye-p.world_pos))),38);
+        }
+        lit=air_perspective(lit*light,p.depth_m,sun.xyz);
+        if(sunset_valley || night_lighting>=0 || add_fixed)lit=course_color_math(lit,p.position.y);
+        return float4(aqua_meters?aqua_color(lit,p.depth_m,p.position.y):lit,1);
+    }
+#elif defined(N64_MODE)
+    float3 haze=night_lighting>=0 ? lerp(float3(.63,.36,.23),float3(.065,.08,.15),night_lighting)
+                                  : lerp(float3(.65,.73,.71),float3(.52,.27,.19),sunset_dusk);
+    if(p.uv.z<0) {
+        float3 surface=scene_material(p.uv,p.color);
+        if(panorama_fog>0 && p.uv.z>-20.5)surface=lerp(surface,panorama_fog_color.rgb,panorama_fog);
+        if(abs(p.uv.z+4)<.1) {
+            float3 n=normalize(cross(ddx(p.view_pos),ddy(p.view_pos)));
+            float3 reflected=reflect(normalize(p.view_pos),n);
+            float height=reflected.y*cp+reflected.z*sp;
+            float heading=atan2(reflected.x,reflected.z)-atan2(sy,cy);
+            float sky=triangle_sample(float2(heading*.159155,saturate(.5+.47*height)),0).b;
+            float2 edge=min(p.uv.xy,1-p.uv.xy);
+            surface+=float3(.22,.31,.35)*(sky-.45)*smoothstep(.025,.065,min(edge.x,edge.y));
+        }
+        surface*=lerp(float3(1,1,1),float3(.86,.65,.52),sunset_dusk);
+        surface=lerp(surface*light,haze,p.fog);
+        if(night_lighting>=0)surface*=lerp(float3(1,1,1),float3(.73,.79,.90),night_lighting);
+        if(sunset_valley || night_lighting>=0 || add_fixed)surface=course_color_math(surface,p.position.y);
+        return float4(aqua_meters?aqua_color(surface,p.view_pos.z*aqua_meters,p.position.y):surface,1);
+    }
+#endif
     float4 color=tiles.Sample(tile_sampler,p.uv);
     clip(color.a-.5);
     if(indexed_textures && p.uv.z != 0) {
@@ -346,32 +671,47 @@ float4 pixel_main(Pixel p):SV_TARGET {
         color.rgb=(day+floor((dusk-day)*texture_weight/32.0))/31.0;
     }
     float3 rgb=color.rgb*p.color;
-    if((math_layers&1) || rows_per_pixel>0) {
-        uint color_word=fixed_color;
-        if(rows_per_pixel>0) {
-            uint row=min(127u,(uint)(p.position.y*rows_per_pixel));
-            color_word=row_subtract[row/4][row%4];
-        }
-        float3 fixed_rgb=float3(color_word&31,(color_word>>5)&31,(color_word>>10)&31);
-        rgb=clamp(round(rgb*31)+(add_fixed?fixed_rgb:-fixed_rgb),0,31)/31;
-    }
+#ifdef ENHANCED_SCENE
+    rgb*=light;
+#ifdef REMASTERED_LIGHT
+    rgb*=lighting;
+#endif
+#endif
+#ifdef ENHANCED_SCENE
+    if(!aqua_meters)
+#endif
+        rgb=course_color_math(rgb,p.position.y);
 #ifdef XR_COLOR
     // Original palette values are display-encoded. The compositor expects linear scene color.
     rgb=lerp(rgb/12.92,pow((rgb+.055)/1.055,2.4),step(.04045,rgb));
+#endif
+#ifdef N64_MODE
+    if(p.uv.z==0)rgb*=lerp(float3(1,1,1),float3(.94,.75,.64),sunset_dusk);
+    rgb=lerp(rgb,haze,p.fog);
+    if(aqua_meters)rgb=aqua_color(rgb,p.view_pos.z*aqua_meters,p.position.y);
+#elif defined(REMASTERED_LIGHT)
+    rgb=air_perspective(rgb,p.depth_m,sun.xyz);
+    if(aqua_meters)rgb=aqua_color(rgb,p.depth_m,p.position.y);
 #endif
     return float4(rgb,1);
 }
 )";
         const D3D_SHADER_MACRO xr_color[]={{"XR_COLOR","1"},{nullptr,nullptr}};
+        const D3D_SHADER_MACRO enhanced_macros[]={{"ENHANCED_SCENE","1"},{"REMASTERED_LIGHT","1"},{nullptr,nullptr}};
+        const D3D_SHADER_MACRO n64_macros[]={{"ENHANCED_SCENE","1"},{"N64_MODE","1"},{nullptr,nullptr}};
+        const auto scene_macros=n64_mode?n64_macros:enhanced_scene?enhanced_macros:nullptr;
+        const auto pixel_macros=headset_output?xr_color:scene_macros;
         ComPtr<ID3DBlob> vertex_blob,pixel_blob,errors;
-        check(D3DCompile(shader,sizeof(shader),nullptr,nullptr,nullptr,"vertex_main","vs_5_0",0,0,&vertex_blob,&errors),"Vertex shader");
-        check(D3DCompile(shader,sizeof(shader),nullptr,headset_output?xr_color:nullptr,nullptr,"pixel_main","ps_5_0",0,0,&pixel_blob,&errors),"Pixel shader");
+        check(D3DCompile(shader,sizeof(shader),nullptr,scene_macros,nullptr,"vertex_main","vs_5_0",0,0,&vertex_blob,&errors),"Vertex shader");
+        check(D3DCompile(shader,sizeof(shader),nullptr,pixel_macros,nullptr,"pixel_main","ps_5_0",0,0,&pixel_blob,&errors),"Pixel shader");
         check(device->CreateVertexShader(vertex_blob->GetBufferPointer(),vertex_blob->GetBufferSize(),nullptr,&vs),"Vertex shader creation");
         check(device->CreatePixelShader(pixel_blob->GetBufferPointer(),pixel_blob->GetBufferSize(),nullptr,&ps),"Pixel shader creation");
-        constexpr char background_shader[]=R"(
+        constexpr char background_shader[]=
+#include "n64_materials.hlsl.inc"
+R"(
 cbuffer View : register(b0) { float cy,sy,cp,sp,aspect,zoom,distance,road_pass; float3 target; float eye_enabled;
-    float4 eye_offset,eye_right,eye_up,eye_forward,projection; };
-cbuffer Environment : register(b1) { float4 crop; uint layer,blank,fixed_color,math_layers; uint gradient_y,sky_color,pad2a,pad2b; uint4 row_subtract[32]; uint indexed_textures,add_fixed; };
+    float4 eye_offset,eye_right,eye_up,eye_forward,projection,shadow_origin,shadow_axis,sun; float isometric; };
+cbuffer Environment : register(b1) { float4 crop; uint layer,blank,fixed_color,math_layers; uint gradient_y,sky_color,pad2a,pad2b; uint4 row_subtract[32]; uint indexed_textures,add_fixed; float aqua_meters,aqua_plane_y; uint sunset_valley; float sunset_dusk; float night_lighting; float panorama_fog; float4 panorama_fog_color; };
 Texture2DArray<uint> indices:register(t1);
 Texture2D<uint> colors:register(t2);
 Texture2D<uint> rain_mask:register(t5);
@@ -381,6 +721,18 @@ Pixel background_vertex(uint id:SV_VertexID) {
     p.position=float4(p.uv*float2(2,-2)+float2(-1,1),0,1);return p;
 }
 float4 background_pixel(Pixel p):SV_TARGET {
+#ifdef ENHANCED_SCENE
+    float2 ray=(p.uv*float2(2,-2)+float2(-1,1))*float2(aspect,1)/zoom;
+    float z=cp-sp*ray.y;
+    float3 direction=normalize(float3(cy*ray.x-sy*z,cp*ray.y+sp,sy*ray.x+cy*z));
+    if(!aqua_meters && !sunset_valley && night_lighting<0 && panorama_fog<0) {
+#ifdef REMASTERED_LIGHT
+        return float4(coastal_sky(direction,sun.xyz),1);
+#else
+        return float4(coastal_sky(direction,normalize(float3(-.56,.23,.79))),1);
+#endif
+    }
+#endif
     int x=(int)floor(crop.x+p.uv.x*crop.z);
     int y=(int)floor(crop.y+p.uv.y*crop.w);
     int ramp=min(511,gradient_y+(int)floor(p.uv.y*crop.w));
@@ -400,6 +752,48 @@ float4 background_pixel(Pixel p):SV_TARGET {
     uint index=(y<0 || y>=256)?1:indices.Load(int4(x&1023,y,layer,0));
     uint value=index==0?sky_color:blank?0:colors.Load(int3(index==1?16+ramp:index,0,0));
     float3 rgb=float3(value&31,(value>>5)&31,(value>>10)&31);
+#ifdef ENHANCED_SCENE
+    // Sample Aqua's own panorama at the horizon. Through the transparent deck
+    // the view extends down to a world-anchored seabed, or the sea outside.
+#ifdef REMASTERED_LIGHT
+    // Night skylines include emissive windows and their own sky gradient.
+    if((sunset_valley || panorama_fog>=0) && night_lighting<0 && !blank) {
+        float3 terrain=rgb/31*(ambient_color(sun.xyz)+.47*sun_color(sun.xyz)*smoothstep(-.08,.25,sun.y));
+        // Preserve the native horizon. The gradient index identifies open sky.
+        float3 horizon=air_perspective(terrain,200,sun.xyz);
+        if(index==1) {
+            float sky_mix=smoothstep(.025,.13,direction.y)*(1-.5*sunset_dusk);
+            horizon=lerp(horizon,coastal_sky(direction,sun.xyz),sky_mix*(1-saturate(panorama_fog)));
+        }
+        rgb=31*horizon;
+    }
+#endif
+    if(aqua_meters && !blank) {
+        rgb/=31;
+        float3 axis=float3(-sy*cp,sp,cy*cp);
+        float3 eye=target-distance*axis;
+        if(isometric) {
+            eye+=distance*(float3(cy,0,sy)*ray.x+float3(sy*sp,cp,-cy*sp)*ray.y);
+            direction=axis;
+        }
+        float t=(aqua_plane_y-eye.y)/min(-.0001,direction.y);
+        if(direction.y<-.001 && t>0) {
+            float2 meters=(eye.xz+t*direction.xz)*aqua_meters;
+            float detail=grain(meters*(layer?float2(.17,.28):float2(.42,1.3)));
+            float3 plane=layer?lerp(float3(.055,.25,.40),float3(.15,.43,.53),detail)
+                              :lerp(float3(.20,.48,.54),float3(.35,.64,.68),detail);
+            rgb=lerp(rgb,plane,smoothstep(.008,.18,-direction.y));
+        }
+#ifdef REMASTERED_LIGHT
+        if(!layer) {
+            rgb*=ambient_color(sun.xyz)+.46*sun_color(sun.xyz)*smoothstep(-.08,.25,sun.y);
+            rgb=lerp(rgb,coastal_sky(direction,sun.xyz),smoothstep(.015,.10,direction.y));
+            rgb=air_perspective(rgb,direction.y<-.001 && t>0?t*aqua_meters:320,sun.xyz);
+        }
+#endif
+        rgb*=31;
+    }
+#endif
     if(index!=0 && (math_layers&2)) {
         float3 fixed_rgb=float3(fixed_color&31,(fixed_color>>5)&31,(fixed_color>>10)&31);
         rgb=clamp(rgb+(add_fixed?fixed_rgb:-fixed_rgb),0,31);
@@ -410,6 +804,24 @@ float4 background_pixel(Pixel p):SV_TARGET {
 #endif
     return float4(rgb,1);
 }
+#ifdef REMASTERED_LIGHT
+float rain_layer(float2 uv,float scale,float speed) {
+    float2 q=float2(uv.x*aspect+.17*uv.y,uv.y)*scale;
+    q.y-=weather_seconds*speed;
+    float2 cell=floor(q);
+    float seed=grain_hash(cell);
+    float2 delta=frac(q)-float2(.1+.8*seed,.5);
+    float width=max(fwidth(uv.x)*aspect*scale,.012);
+    float streak=(1-smoothstep(.008,.008+width,abs(delta.x)))*
+                 (1-smoothstep(.07,.29,abs(delta.y)))*step(.76,seed);
+    return streak;
+}
+float4 weather_rain_pixel(Pixel p):SV_TARGET {
+    float alpha=(.22*rain_layer(p.uv,28,19)+.35*rain_layer(p.uv+.37,15,14))*rain_strength;
+    float3 tint=lerp(float3(.37,.47,.61),float3(.80,.86,.90),smoothstep(-.16,.32,sun.y));
+    return float4(tint*alpha,alpha);
+}
+#endif
 float4 rain_pixel(Pixel p):SV_TARGET {
     // Keep original pixels square on widescreen and extend the pattern to
     // the edges without stretching the 208 x 128 viewport.
@@ -428,8 +840,71 @@ float4 rain_pixel(Pixel p):SV_TARGET {
         ComPtr<ID3DBlob> backdrop_vertex_blob,backdrop_pixel_blob;
         check(D3DCompile(background_shader,sizeof(background_shader),nullptr,nullptr,nullptr,"background_vertex","vs_5_0",0,0,&backdrop_vertex_blob,&errors),"Backdrop vertex shader");
         check(device->CreateVertexShader(backdrop_vertex_blob->GetBufferPointer(),backdrop_vertex_blob->GetBufferSize(),nullptr,&backdrop_vs),"Backdrop vertex shader creation");
-        check(D3DCompile(background_shader,sizeof(background_shader),nullptr,headset_output?xr_color:nullptr,nullptr,"background_pixel","ps_5_0",0,0,&backdrop_pixel_blob,&errors),"Backdrop pixel shader");
+        check(D3DCompile(background_shader,sizeof(background_shader),nullptr,pixel_macros,nullptr,"background_pixel","ps_5_0",0,0,&backdrop_pixel_blob,&errors),"Backdrop pixel shader");
         check(device->CreatePixelShader(backdrop_pixel_blob->GetBufferPointer(),backdrop_pixel_blob->GetBufferSize(),nullptr,&backdrop_ps),"Backdrop pixel shader creation");
+        if(look==RaceLook::remastered) {
+            // Fall back to the highest mutually supported color/depth sample count.
+            for(UINT samples=msaa;samples>=2;samples/=2) {
+                UINT color_levels=0,depth_levels=0;
+                device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM,samples,&color_levels);
+                device->CheckMultisampleQualityLevels(DXGI_FORMAT_D32_FLOAT,samples,&depth_levels);
+                if(color_levels && depth_levels) {coverage_samples=samples;break;}
+            }
+            std::cout<<"Remastered MSAA samples: "<<coverage_samples<<"\n";
+            D3D11_BUFFER_DESC desc_atmosphere{};
+            desc_atmosphere.ByteWidth=sizeof(RaceWeather);desc_atmosphere.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+            check(device->CreateBuffer(&desc_atmosphere,nullptr,&atmosphere),"Weather constants");
+            ComPtr<ID3DBlob> code;
+            if(weather.rain>0 || ravine_style) {
+                check(D3DCompile(background_shader,sizeof(background_shader),nullptr,scene_macros,nullptr,"weather_rain_pixel","ps_5_0",0,0,&code,&errors),"Rain streak shader");
+                check(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&weather_rain_ps),"Rain streak pass");
+                code.Reset();
+            }
+            check(D3DCompile(shader,sizeof(shader),nullptr,scene_macros,nullptr,"car_shadow_vertex","vs_5_0",0,0,&code,&errors),"Car shadow shader");
+            check(device->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&car_shadow_vs),"Car shadow pass");
+            auto make_shadow_map=[&](UINT size,auto& dsv,auto& srv) {
+                D3D11_TEXTURE2D_DESC desc{};
+                desc.Width=desc.Height=size; desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
+                desc.Format=DXGI_FORMAT_R32_TYPELESS; desc.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
+                ComPtr<ID3D11Texture2D> map;
+                check(device->CreateTexture2D(&desc,nullptr,&map),"Shadow map");
+                D3D11_DEPTH_STENCIL_VIEW_DESC depth{};
+                depth.Format=DXGI_FORMAT_D32_FLOAT; depth.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
+                check(device->CreateDepthStencilView(map.Get(),&depth,dsv.GetAddressOf()),"Shadow depth view");
+                D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+                view.Format=DXGI_FORMAT_R32_FLOAT; view.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D; view.Texture2D.MipLevels=1;
+                check(device->CreateShaderResourceView(map.Get(),&view,srv.GetAddressOf()),"Shadow texture view");
+            };
+            make_shadow_map(car_shadow_size,car_shadow_depth,car_shadow_view);
+            if(sunset_style || harbor_style || sun[1]>.01f) {
+                make_shadow_map(course_shadow_size,course_shadow_depth,course_shadow_view);
+                check(D3DCompile(shader,sizeof(shader),nullptr,scene_macros,nullptr,"course_shadow_vertex","vs_5_0",0,0,code.ReleaseAndGetAddressOf(),&errors),"Course shadow vertex shader");
+                check(device->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&course_shadow_vs),"Course shadow vertex pass");
+                check(D3DCompile(shader,sizeof(shader),nullptr,scene_macros,nullptr,"course_shadow_pixel","ps_5_0",0,0,code.ReleaseAndGetAddressOf(),&errors),"Course shadow alpha shader");
+                check(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&course_shadow_ps),"Course shadow alpha pass");
+            }
+            D3D11_SAMPLER_DESC sampler{};
+            sampler.Filter=D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+            sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_BORDER;
+            sampler.ComparisonFunc=D3D11_COMPARISON_GREATER_EQUAL;
+            check(device->CreateSamplerState(&sampler,&car_shadow_sampler),"Car shadow sampler");
+        }
+        if(n64_mode) {
+            n64_tiles=n64::material_tiles(device.Get());
+            constexpr char display_shader[]=
+#include "n64_display.hlsl.inc"
+            ;
+            ComPtr<ID3DBlob> code;
+            check(D3DCompile(display_shader,sizeof(display_shader),nullptr,nullptr,nullptr,
+                "display_pixel","ps_5_0",0,0,&code,&errors),"N64 display shader");
+            check(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&display_ps),"N64 display pass");
+            if(low_raster) {
+                UINT color_levels=0,depth_levels=0;
+                device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM,4,&color_levels);
+                device->CheckMultisampleQualityLevels(DXGI_FORMAT_D32_FLOAT,4,&depth_levels);
+                if(color_levels && depth_levels)coverage_samples=4;
+            }
+        }
         ComPtr<ID3DBlob> rain_blob;
         check(D3DCompile(background_shader,sizeof(background_shader),nullptr,nullptr,nullptr,"rain_pixel","ps_5_0",0,0,&rain_blob,&errors),"Rain shader");
         check(device->CreatePixelShader(rain_blob->GetBufferPointer(),rain_blob->GetBufferSize(),nullptr,&rain_ps),"Rain shader creation");
@@ -449,6 +924,7 @@ float4 rain_pixel(Pixel p):SV_TARGET {
         // coplanar front/back faces; drawing both causes competing textures.
         D3D11_RASTERIZER_DESC raster{}; raster.FillMode=D3D11_FILL_SOLID; raster.CullMode=D3D11_CULL_BACK; raster.DepthClipEnable=TRUE;
         raster.FrontCounterClockwise=TRUE;
+        raster.MultisampleEnable=coverage_samples>1;
         check(device->CreateRasterizerState(&raster,&solid),"Solid rasterizer");
         raster.CullMode=D3D11_CULL_NONE;
         check(device->CreateRasterizerState(&raster,&sprite_solid),"Sprite rasterizer");
@@ -553,7 +1029,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
     }
     void set_rain(std::span<const srf::RainPixel> pixels) {
         show_rain=!pixels.empty();
-        if(!show_rain)return;
+        if(!show_rain || (ravine_style && !n64_mode))return;
         if(!rain_mask) {
             D3D11_TEXTURE2D_DESC desc{};
             desc.Width=208;desc.Height=128;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
@@ -635,6 +1111,15 @@ float4 main(float4 position : SV_Position) : SV_Target {
         check(device->CreateShaderResourceView(backdrop_color_texture.Get(),nullptr,&backdrop_colors),"Backdrop color view");
     }
     void set_environment(const srf::EnvironmentPresentation& value) {
+        if((sunset_style || cruise_style || harbor_style) && !n64_mode && backdrop_weight!=value.palette_weight) {
+            // Night starts approach the previous evening without crossing noon.
+            const float start=float(start_hour<6?start_hour+24:start_hour);
+            const float blend=value.palette_weight/31.f;
+            const float hour=harbor_style ? std::lerp(3.f,6.5f,blend)
+                           : cruise_style ? std::lerp(17.5f,20.f,blend) : std::lerp(start,17.65f,blend);
+            sun=sun_at(hour);
+            course_shadow_dirty=true;
+        }
         environment=value;
         if(!backdrop.available() || (backdrop_weight==value.palette_weight && backdrop_fog==value.fog_weight &&
             backdrop_fog_rgb555==value.fog_rgb555 && skyline_phase==value.skyline_phase &&
@@ -661,18 +1146,19 @@ float4 main(float4 position : SV_Position) : SV_Target {
         skyline_phase=value.skyline_phase;
         skyline_blend_phase=value.skyline_blend_phase;
     }
-    SceneTarget make_target(UINT w,UINT h,ComPtr<ID3D11Texture2D> color={},DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN) {
+    SceneTarget make_target(UINT w,UINT h,ComPtr<ID3D11Texture2D> color={},DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN,
+                            UINT samples=1,bool readable=false) {
         SceneTarget result{w,h,std::move(color)};
         if (!result.color) {
             D3D11_TEXTURE2D_DESC desc{}; desc.Width=w; desc.Height=h;
             desc.MipLevels=1; desc.ArraySize=1; desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
-            desc.SampleDesc.Count=1; desc.BindFlags=D3D11_BIND_RENDER_TARGET;
+            desc.SampleDesc.Count=samples; desc.BindFlags=D3D11_BIND_RENDER_TARGET | (readable?D3D11_BIND_SHADER_RESOURCE:0);
             check(device->CreateTexture2D(&desc,nullptr,&result.color),"Offscreen image");
         }
         D3D11_RENDER_TARGET_VIEW_DESC view{};view.Format=format;view.ViewDimension=D3D11_RTV_DIMENSION_TEXTURE2D;
         check(device->CreateRenderTargetView(result.color.Get(),format==DXGI_FORMAT_UNKNOWN?nullptr:&view,&result.rtv),"Render target");
         D3D11_TEXTURE2D_DESC dd{}; dd.Width=w; dd.Height=h; dd.MipLevels=1; dd.ArraySize=1;
-        dd.Format=DXGI_FORMAT_D32_FLOAT; dd.SampleDesc.Count=1; dd.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+        dd.Format=DXGI_FORMAT_D32_FLOAT; dd.SampleDesc.Count=samples; dd.BindFlags=D3D11_BIND_DEPTH_STENCIL;
         ComPtr<ID3D11Texture2D> depth;
         check(device->CreateTexture2D(&dd,nullptr,&depth),"Depth image");
         check(device->CreateDepthStencilView(depth.Get(),nullptr,&result.dsv),"Depth view");
@@ -680,15 +1166,27 @@ float4 main(float4 position : SV_Position) : SV_Target {
     }
     void resize(UINT w,UINT h) {
         context->OMSetRenderTargets(0,nullptr,nullptr);
-        desktop={};
+        desktop={};sampled_scene={};scene_view.Reset();resolved_scene.Reset();
         ComPtr<ID3D11Texture2D> back_buffer;
         if(swapchain) {
             check(swapchain->ResizeBuffers(0,w,h,DXGI_FORMAT_UNKNOWN,0),"Swapchain resize");
             check(swapchain->GetBuffer(0,IID_PPV_ARGS(&back_buffer)),"Swapchain image");
         }
         desktop=make_target(w,h,std::move(back_buffer));
+        if(n64_mode || coverage_samples>1)
+            sampled_scene=make_target(low_raster?320:w,low_raster?240:h,{},DXGI_FORMAT_UNKNOWN,coverage_samples,coverage_samples==1);
+        if(n64_mode) {
+            if(coverage_samples>1) {
+                D3D11_TEXTURE2D_DESC desc{};sampled_scene.color->GetDesc(&desc);
+                desc.SampleDesc.Count=1;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+                check(device->CreateTexture2D(&desc,nullptr,resolved_scene.ReleaseAndGetAddressOf()),"N64 coverage resolve");
+            }
+            check(device->CreateShaderResourceView(resolved_scene?resolved_scene.Get():sampled_scene.color.Get(),
+                nullptr,scene_view.ReleaseAndGetAddressOf()),"N64 scene view");
+        }
     }
     void load(const srf::Mesh& mesh,std::size_t frame) {
+        cloud_vertices=0;
         const auto& source=mesh.frames.at(frame%mesh.frames.size());
         std::array<double,3> low{1e20,1e20,1e20}, high{-1e20,-1e20,-1e20};
         for (const auto& v:source) {
@@ -721,7 +1219,9 @@ float4 main(float4 position : SV_Position) : SV_Target {
     }
     float normalized_distance(float distance) const {return float(distance/world_radius);}
     void load_race_world(const srf::World& world,std::span<const RenderVehicle> vehicles,const srf::Rom& rom,
-                         const srf::NativeRace& race,const srf::CourseScenery& scenery) {
+                         const srf::NativeRace& race,const srf::CourseScenery& scenery,float phase_fraction=0) {
+        weather.seconds=(float(race.phase())+phase_fraction)/14.f;
+        ravine_wet=ravine_style && (race.racers()[race.player_index()].body.word(0x8a)&1);
         load_world(world,0,vehicles,&rom,scenery.poses(),race.rock_poses(),race.cone_poses(),
                    race.bridge_poses(),scenery.sprites(),&race);
     }
@@ -753,6 +1253,21 @@ float4 main(float4 position : SV_Position) : SV_Target {
         world_radius=std::max({high[0]-low[0],high[1]-low[1],high[2]-low[2],1.0})*.55;
         for(unsigned a=0;a<3;++a) world_center[a]=(low[a]+high[a])*.5;
         std::vector<GpuVertex> triangles,lines;
+        // Terrain, truss and seating share one immutable buffer for the Easy Ride session.
+        std::vector<GpuVertex> landscape;
+        if(enhanced_scene && !landscape_buffer) {
+            const auto normalize=[this](const auto& p){return normalize_world(p);};
+            // Y increases downward. Keep the surface just below the tree roots
+            // or the native water crossing, both placed at course Y=0.
+            if(forest_style)n64::level_terrain(landscape,8,-3,normalize);
+            else if(white_land_style)n64::level_terrain(landscape,8,-23,normalize,{.85f,.90f,.95f});
+            // The lake creature swims at Y=160, below the lowest road (Y=0).
+            else if(lake_style)n64::level_terrain(landscape,160,-10,normalize);
+            // Harbor's two water crossings bottom out at Y=-160.
+            else if(harbor_style)n64::level_terrain(landscape,-152,-10,normalize);
+            else if(sea_style)n64::level_terrain(landscape,8,-10,normalize);
+            else if(!aqua_style && !sunset_style && !night_style && !ravine_style && !sky_ramp_style)n64::coastal_terrain(landscape,world,models,normalize);
+        }
         const auto draw_model=[&](const srf::WorldModel& model,const auto& transform,std::uint8_t opcode=0,std::int16_t descriptor_bias=0,float painter_depth=0,bool static_model=false,
                                   std::optional<std::size_t> animation_frame=std::nullopt, unsigned sign_phase=0) {
             const auto pose_index=animation_frame.value_or(frame)%model.frames.size();
@@ -765,6 +1280,23 @@ float4 main(float4 position : SV_Position) : SV_Target {
             if(static_model && backs==barrier_backs.end())backs=barrier_backs.emplace(key,
                 srf::missing_barrier_backfaces(model,pose_index)).first;
             const auto origin=transform(srf::Vertex{0,0,0});
+            const bool truss=enhanced_scene && static_model && model.descriptor_address==n64::truss_descriptor;
+            const bool underpass=enhanced_scene && static_model && model.descriptor_address==n64::underpass_descriptor;
+            const auto descriptor=model.descriptor_address;
+            if(aqua_style && static_model && !landscape_buffer && (descriptor==0xd46c || descriptor==0xd450))
+                n64::aqua_panel_seams(landscape,descriptor,[&](unsigned i) {
+                    const auto p=transform(pose.at(i));
+                    return normalize_world({float(p[0]),float(p[1])+3,float(p[2])});
+                });
+            const bool opponent_shell=enhanced_scene && !n64_mode && (descriptor==0xa7e8 || descriptor==0xa804 || descriptor==0xa820);
+            const bool stand=descriptor==n64::left_stand || descriptor==n64::right_stand;
+            const bool building=enhanced_scene && static_model && (stand || descriptor==n64::fuel_station ||
+                descriptor==n64::red_cottage || descriptor==n64::blue_cottage);
+            if(building && (stand || descriptor==n64::fuel_station) && !landscape_buffer)
+                n64::trackside_details(landscape,descriptor,[&](const srf::Vertex& v) {
+                    const auto p=transform(v);
+                    return normalize_world({float(p[0]),float(p[1]),float(p[2])});
+                });
             const auto road_origin=normalize_world({float(origin[0]),float(origin[1]),float(origin[2])});
             const float road_bias=normalized_distance(float(descriptor_bias)+(opcode==0x0c?8000.f:0.f));
             const std::array basis{transform(srf::Vertex{1,0,0}),transform(srf::Vertex{0,1,0}),transform(srf::Vertex{0,0,1})};
@@ -775,6 +1307,20 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 const bool priority_line=face.indices.size()==2 && (opcode==0x0c || descriptor_bias>0);
                 const float support_depth=(priority_line || srf::road_support_surface(opcode,descriptor_bias,pose,face))?painter_depth:0.f;
                 const unsigned material=face.attributes[2];
+                if(truss && face.indices.size()==4 && (material==0x34 || material==0x36)) {
+                    // The two paint indices are opposite windings of the same flat member.
+                    if(material==0x34 && !landscape_buffer) {
+                        std::array<n64::Vec,4> panel;
+                        n64::Vec depth;
+                        for(unsigned a=0;a<3;++a)depth[a]=float(basis[2][a]-origin[a]);
+                        for(unsigned i=0;i<4;++i) {
+                            const auto p=transform(pose.at(face.indices[i]));
+                            panel[i]={float(p[0]),float(p[1]),float(p[2])};
+                        }
+                        n64::steel_beam(landscape,panel,depth,[this](const auto& p){return normalize_world(p);});
+                    }
+                    continue;
+                }
                 const float intensity=.55f+.35f*std::abs(float(static_cast<std::int8_t>(face.attributes[4]))/127.f);
                 float r=.7f*intensity,g=.25f*intensity,b=.7f*intensity;
                 if(srf::generated::world_material_kinds[material]) {
@@ -787,22 +1333,84 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 const bool course_sign=material==0xc5 && sign_phase!=0;
                 const auto texture=texture_locations.find(course_sign ? std::pair{0x9ba3u,sign_phase} : std::pair{0x8f91u,material});
                 const bool textured=texture!=texture_locations.end() && face.indices.size()==4;
+                const bool windshield=opponent_shell && material==0x0d;
+                const bool side_glass=std::abs(int(std::int8_t(face.attributes[3])))>std::abs(int(std::int8_t(face.attributes[5])));
+                int left=INT_MAX,right=INT_MIN,top=INT_MAX,bottom=INT_MIN;
+                if(windshield)for(auto index:face.indices) {
+                    const auto& v=pose.at(index);
+                    const auto horizontal=side_glass?v.z:v.x;
+                    left=std::min(left,horizontal);right=std::max(right,horizontal);
+                    top=std::min(top,v.y);bottom=std::max(bottom,v.y);
+                }
+                bool along_z=false;
+                if(building && face.indices.size()>=3) {
+                    // Use the wider horizontal axis of the face for upright cladding.
+                    const auto& a=pose.at(face.indices[0]);const auto& b=pose.at(face.indices[2]);
+                    along_z=std::abs(a.z-b.z)>std::abs(a.x-b.x);
+                }
                 if(textured) r=g=b=1;
+                const bool barrier=enhanced_scene && static_model && !textured && (material==0x7b || material==0x7c);
+                if(barrier && opcode==2 && face.indices.size()==4) {
+                    std::array<n64::Vec,4> panel;
+                    for(unsigned i=0;i<4;++i) {
+                        const auto p=transform(pose.at(face.indices[i]));
+                        panel[i]={float(p[0]),float(p[1]),float(p[2])};
+                    }
+                    n64::barrier_trim(triangles,panel,[this](const auto& p){return normalize_world(p);});
+                }
                 auto vertex=[&](unsigned index) {
-                    auto point=transform(pose.at(index));
+                    auto local=pose.at(index);
+                    // The gantry's two inner leg faces coincide with the barrier
+                    // faces at +/-1920. Clear the 11-unit rail cap as well.
+                    if(enhanced_scene && model.descriptor_address==0xac9c && std::abs(local.x)==1920)
+                        local.x+=local.x<0?24:-24;
+                    auto point=transform(local);
                     for(unsigned a=0;a<3;++a)for(unsigned b=0;b<3;++b)
                         point[a]+=(basis[b][a]-origin[a])*shift[b];
                     const auto p=normalize_world({float(point[0]),float(point[1]),float(point[2])});
                     GpuVertex out{p[0],p[1],p[2],r,g,b};
                     out.painter_depth=support_depth;
                     if(support_depth!=0)out.road_origin_bias={road_origin[0],road_origin[1],road_origin[2],road_bias};
-                    if(textured) {
+                    if(building && face.indices.size()>=3) {
+                        n64::building_surface(out,descriptor,material,local,along_z);
+                    } else if(windshield) {
+                        out.texture=-4;
+                        out.u=float((side_glass?local.z:local.x)-left)/std::max(1,right-left);
+                        out.v=float(bottom-local.y)/std::max(1,bottom-top);
+                    } else if(textured) {
                         const auto corner=std::find(face.indices.begin(),face.indices.end(),index)-face.indices.begin();
                         // GSU01:9171..917D consumes original metadata UV bytes
                         // in face-vertex order; no guessed decal rotation.
                         const float u=float(texture->second.uv[corner][0])+.5f;
                         const float v=float(texture->second.uv[corner][1])+.5f;
                         out.u=u/128.f;out.v=v/128.f;out.texture=float(texture->second.layer);
+                    } else if(enhanced_scene && static_model && face.indices.size()>=3) {
+                        // Easy Ride's alternating asphalt, concrete barriers and hillside greens.
+                        if(aqua_style ? n64::aqua_driving_surface(descriptor,opcode,material) : n64::asphalt_material(descriptor,material)) out.texture=-1;
+                        if((sunset_style || night_style || forest_style || white_land_style || lake_style || ravine_style || sky_ramp_style) && n64::graded_road(opcode,material))out.texture=-21;
+                        if((sea_style || harbor_style) && n64::sea_breeze_road(opcode,material))out.texture=-21;
+                        if((sunset_style || ravine_style) && material>=0x5a && material<=0x62)out.texture=-22;
+                        if(aqua_style && n64::aqua_tunnel_rib(descriptor) && material>=0x2a && material<=0x2f)
+                            out.texture=-5; // exposed metal arch, including the overhead span
+                        if(barrier) out.texture=-2;
+                        if(material>=0x55 && material<=0x59)out.texture=white_land_style?-23:-3;
+                        if(material==0xa8 && !white_land_style)out.texture=-3;
+                        if(model.descriptor_address==0xad60 && material>=0x4c && material<=0x4f) {
+                            out.texture=-9;
+                            out.r=1.12f-.085f*(material-0x4c);out.g=0;out.b=.78f;
+                        }
+                        if(out.texture<0) {out.u=float(point[0])/90.f;out.v=float(point[2])/90.f;}
+                        if(out.texture==-22) {
+                            out.u=(float(point[0])*.71f+float(point[2])*.71f)/90.f;
+                            out.v=float(point[1])/90.f;
+                        }
+                        if(barrier) {out.u=(float(point[0])*.81f+float(point[2])*.59f)/90.f;out.v=float(point[1])/90.f;}
+                        if(underpass && out.texture==-1) {
+                            out.texture=-6;out.u=float(local.x)/90;out.v=float(local.z)/90;
+                        } else if(truss && (material==0x29 || material==0x88 || material==0x26)) {
+                            out.texture=material==0x29?-7:-8;
+                            out.u=float(material==0x88?local.y:local.z)/90;out.v=float(local.x)/90;
+                        }
                     }
                     return out;
                 };
@@ -814,7 +1422,18 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 }
             }
         };
+        std::vector<std::pair<unsigned,std::size_t>> caster_poses;
+        caster_poses.reserve(course_shadow_poses.size());
+        // Sky Ramp's horizontal cloud tiles belong behind the elevated road.
+        // The course fog controls visibility when driving through the bank.
+        if(sky_ramp_style)for(const auto& instance:world.instances) {
+            if(instance.visual_descriptor!=0xb850)continue;
+            const auto* model=models.at(instance.visual_descriptor);
+            draw_model(*model,[&](const srf::Vertex& v){return srf::world_position(v,instance);},instance.opcode,0,0,true);
+        }
+        cloud_vertices=static_cast<UINT>(triangles.size());
         for(const auto& instance:world.instances) {
+            if(sky_ramp_style && instance.visual_descriptor==0xb850)continue;
             const auto replaces_instance=[&](const auto& pose){return pose.command_offset==instance.command_offset;};
             if(std::any_of(geometric_actors.begin(),geometric_actors.end(),replaces_instance) ||
                std::any_of(scenery.begin(),scenery.end(),replaces_instance) ||
@@ -840,9 +1459,17 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 auto bridge=std::find_if(bridges.begin(),bridges.end(),replaces_instance);
                 std::optional<std::size_t> deck_frame;
                 if(bridge!=bridges.end()) deck_frame=bridge->frame;
+                if(course_shadow_depth)
+                    caster_poses.emplace_back(instance.command_offset,deck_frame.value_or(frame)%found->second->frames.size());
                 draw_model(*found->second,[&](const srf::Vertex& v){return srf::world_position(v,instance);},
                            instance.opcode,signed_bias,painter_depth,true,deck_frame,instance.sign_phase);
             }
+        }
+        // Camera-facing sprites and moving racers follow the stationary course mesh.
+        course_shadow_vertices=static_cast<UINT>(triangles.size());
+        if(caster_poses!=course_shadow_poses) {
+            course_shadow_dirty=true;
+            course_shadow_poses=std::move(caster_poses);
         }
         const float cy=std::cos(controls.yaw),sy=std::sin(controls.yaw);
         const float cp=std::cos(controls.pitch),sp=std::sin(controls.pitch);
@@ -877,11 +1504,10 @@ float4 main(float4 position : SV_Position) : SV_Target {
         // Stunt stars move above and behind ramps. Test their actual geometry
         // against the deck before rebuilding the road-priority depth for cars.
         draw_actors(geometric_actors);
-        world_vertex_count=static_cast<UINT>(triangles.size());
-        world_line_count=static_cast<UINT>(lines.size());
-        vehicle_depth_pass=rom && !vehicles.empty();
-        for(const auto actors:{scenery,extra_actors,cones,props,pickups,bonus})draw_actors(actors);
-        for(const auto& vehicle:vehicles) {
+        // From the banked descent the road crosses in front of the lake creature.
+        // Depth-test lake scenery against the deck before applying racer priority.
+        if(lake_style)draw_actors(scenery);
+        const auto draw_shell=[&](const RenderVehicle& vehicle) {
             const auto found=models.find(vehicle.descriptor);
             if(found==models.end()) throw std::runtime_error("Original vehicle visual descriptor missing from generated world");
             draw_model(*found->second,[&](const srf::Vertex& v) {
@@ -890,21 +1516,81 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 for(unsigned a=0;a<3;++a) for(unsigned b=0;b<3;++b) p[a]+=local[b]*vehicle.orientation[b*3+a];
                 return p;
             });
+        };
+        const bool mesh_rivals=enhanced_scene && !n64_mode;
+        rival_start=static_cast<UINT>(triangles.size());
+        if(race_camera.view==RaceCamera::isometric) {
+            car_centers={};
+            for(std::size_t i=0;i<std::min(vehicles.size(),car_centers.size());++i) {
+                const auto p=normalize_world(vehicles[i].position);
+                car_centers[i]={p[0],p[1],p[2],1};
+            }
         }
+        // Draw the entire rival against geometric depth. The later actor pass
+        // uses the SNES road priority, which can put a hill behind a hidden car.
+        if(mesh_rivals)for(const auto& vehicle:vehicles)if(!vehicle.player)draw_shell(vehicle);
+        two_sided_world_start=static_cast<UINT>(triangles.size());
+        if(mesh_rivals)for(const auto& vehicle:vehicles)if(!vehicle.player) {
+            n64::draw_car(triangles,vehicle,false,[this](const auto& p){return normalize_world(p);});
+            for(const auto& sprite:vehicle.sprites)if(!sprite.wheel)draw_sprite(sprite,vehicle_winding);
+        }
+        world_vertex_count=static_cast<UINT>(triangles.size());
+        world_line_count=static_cast<UINT>(lines.size());
+        vehicle_depth_pass=rom && !vehicles.empty();
+        if(!lake_style)draw_actors(scenery);
+        for(const auto actors:{extra_actors,cones,props,pickups,bonus})draw_actors(actors);
+        for(const auto& vehicle:vehicles)if(!enhanced_scene || (!vehicle.player && !mesh_rivals))draw_shell(vehicle);
         // Wheel and eye sprites draw over the rebuilt actor depth. The trees
         // above belong to the world and occlude cars only at opaque texels.
         const auto surface_count=static_cast<UINT>(triangles.size());
+        if(enhanced_scene) for(const auto& vehicle:vehicles) if(vehicle.player) {
+            const auto p=normalize_world(vehicle.position);
+            shadow_origin={p[0],p[1],p[2],float(world_radius/90)};
+            shadow_axis={vehicle.orientation[0],vehicle.orientation[2],vehicle.orientation[6],vehicle.orientation[8]};
+            n64::draw_car(triangles,vehicle,n64_mode,[this](const auto& p){return normalize_world(p);});
+        }
+        car_shadow_vertices=static_cast<UINT>(triangles.size())-surface_count;
+        if(mesh_rivals && race_camera.view==RaceCamera::cockpit)
+            for(const auto& vehicle:vehicles)if(vehicle.player)
+                n64::draw_car(triangles,vehicle,false,[this](const auto& p){return normalize_world(p);},true);
         if(race)for(const auto sprites:{race->spray_sprites(),race->breakable_sprites()}) {
             for(const auto& sprite:sprites) {
                 const auto p=sprite.position;
                 draw_sprite({sprite.table,sprite.frame,{float(p.x),float(p.y),float(p.z)},float(sprite.diameter)},vehicle_winding);
             }
         }
-        for(const auto& vehicle:vehicles) for(const auto& sprite:vehicle.sprites) draw_sprite(sprite,vehicle_winding);
+        if(!mesh_rivals)for(const auto& vehicle:vehicles)if(!enhanced_scene || !vehicle.player)
+            for(const auto& sprite:vehicle.sprites)draw_sprite(sprite,vehicle_winding);
+        if(!landscape.empty()) {
+            upload_vertices(landscape,landscape_buffer);
+            landscape_vertex_count=static_cast<UINT>(landscape.size());
+        }
         upload(triangles,lines,surface_count);
     }
     void render(std::span<const std::uint32_t> demo_frame={}) {
-        render_scene(desktop,nullptr,demo_frame);
+        render_scene(sampled_scene.color?sampled_scene:desktop,nullptr,demo_frame);
+        if(!n64_mode && coverage_samples>1) {
+            context->OMSetRenderTargets(0,nullptr,nullptr);
+            context->ResolveSubresource(desktop.color.Get(),0,sampled_scene.color.Get(),0,DXGI_FORMAT_R8G8B8A8_UNORM);
+        }
+        if(n64_mode) {
+            context->OMSetRenderTargets(1,desktop.rtv.GetAddressOf(),nullptr);
+            if(resolved_scene)context->ResolveSubresource(resolved_scene.Get(),0,sampled_scene.color.Get(),0,DXGI_FORMAT_R8G8B8A8_UNORM);
+            float w=float(desktop.width),h=float(desktop.height);
+            if(low_raster) {
+                constexpr float black[]{0,0,0,1};
+                context->ClearRenderTargetView(desktop.rtv.Get(),black);
+                w=std::min(w,h*4/3);h=w*3/4;
+            }
+            const D3D11_VIEWPORT viewport{(desktop.width-w)/2,(desktop.height-h)/2,w,h,0,1};
+            context->RSSetViewports(1,&viewport);context->RSSetState(sprite_solid.Get());
+            context->IASetInputLayout(nullptr);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->VSSetShader(backdrop_vs.Get(),nullptr,0);context->PSSetShader(display_ps.Get(),nullptr,0);
+            context->PSSetShaderResources(0,1,scene_view.GetAddressOf());
+            context->Draw(3,0);
+            ID3D11ShaderResourceView* empty=nullptr;context->PSSetShaderResources(0,1,&empty);
+        }
         if(!demo_frame.empty())render_course_map(demo_frame,true);
         else present();
     }
@@ -923,7 +1609,6 @@ private:
         context->ClearRenderTargetView(rtv.Get(),background);
         context->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
         context->OMSetDepthStencilState(reverse_depth.Get(),0);
-        context->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv.Get());
         const float panel_scale=!eye && bonus_has_dashboard?std::min(width/256.f,height/168.f):0.f;
         const float play_height=std::max(1.f,float(height)-std::round(panel_scale*40));
         D3D11_VIEWPORT viewport{0,0,float(width),play_height,0,1};
@@ -936,14 +1621,94 @@ private:
             constexpr float black[]{0,0,0,1};
             context->ClearRenderTargetView(rtv.Get(),black);
         }
-        context->RSSetViewports(1,&viewport); context->RSSetState(controls.wire?wire.Get():solid.Get());
         Constants value{std::cos(controls.yaw),std::sin(controls.yaw),std::cos(controls.pitch),std::sin(controls.pitch),
             aspect,controls.zoom,controls.distance,0,controls.target_x,controls.target_y,controls.target_z,0};
+        if(enhanced_scene) {value.shadow_origin=shadow_origin;value.shadow_axis=shadow_axis;value.sun=sun;}
+        if(race_camera.view==RaceCamera::isometric) {
+            value.isometric=value.cutaway=1;
+            value.car_centers=car_centers;
+        }
+        const bool underwater=(aqua_style && (environment.alternate_backdrop || environment.blank_backdrop)) ||
+                              ((lake_style || harbor_style) && environment.fog_weight>0);
+        if(atmosphere) {
+            value.sun[3]=float(world_radius/90); // metres per normalized world unit, including the actor pass
+            auto local_weather=weather;
+            if(ravine_style) {
+                // The original grey sky clears through the final-lap palette blend.
+                const float storm=1.f-environment.palette_weight/31.f;
+                local_weather.clouds=std::max(local_weather.clouds,.9f*storm);
+                if(ravine_wet) {
+                    local_weather.rain=1;
+                    local_weather.extinction=std::max(local_weather.extinction,.007f);
+                }
+            }
+            if(underwater)
+                local_weather={.25f,0,0,weather.seconds};
+            context->UpdateSubresource(atmosphere.Get(),0,nullptr,&local_weather,0,0);
+            context->PSSetConstantBuffers(2,1,atmosphere.GetAddressOf());
+        }
         if(eye)value.set_eye(*eye);
         context->UpdateSubresource(constants.Get(),0,nullptr,&value,0,0);
         context->VSSetConstantBuffers(0,1,constants.GetAddressOf());
         context->PSSetConstantBuffers(0,1,constants.GetAddressOf());
+        if(car_shadow_depth) {
+            ID3D11ShaderResourceView* unbound=nullptr;
+            context->PSSetShaderResources(8,1,&unbound);
+            context->OMSetRenderTargets(0,nullptr,car_shadow_depth.Get());
+            context->ClearDepthStencilView(car_shadow_depth.Get(),D3D11_CLEAR_DEPTH,0,0);
+            D3D11_VIEWPORT shadow_viewport{0,0,float(car_shadow_size),float(car_shadow_size),0,1};
+            context->RSSetViewports(1,&shadow_viewport);
+            context->RSSetState(sprite_solid.Get()); // open and mirrored car panels cast on both sides
+            context->IASetInputLayout(layout.Get());
+            const UINT stride=sizeof(GpuVertex),offset=0;
+            context->IASetVertexBuffers(0,1,vertices.GetAddressOf(),&stride,&offset);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->VSSetShader(car_shadow_vs.Get(),nullptr,0);
+            context->PSSetShader(nullptr,nullptr,0);
+            context->Draw(car_shadow_vertices,surface_vertex_count);
+            if(course_shadow_depth && course_shadow_dirty && sun[1]>.01f) {
+                context->PSSetShaderResources(9,1,&unbound);
+                context->OMSetRenderTargets(0,nullptr,course_shadow_depth.Get());
+                context->ClearDepthStencilView(course_shadow_depth.Get(),D3D11_CLEAR_DEPTH,0,0);
+                D3D11_VIEWPORT course_viewport{0,0,float(course_shadow_size),float(course_shadow_size),0,1};
+                context->RSSetViewports(1,&course_viewport);
+                context->VSSetShader(course_shadow_vs.Get(),nullptr,0);
+                context->PSSetShader(course_shadow_ps.Get(),nullptr,0);
+                context->PSSetShaderResources(0,1,texture_view.GetAddressOf());
+                context->PSSetSamplers(0,1,texture_sampler.GetAddressOf());
+                context->Draw(course_shadow_vertices-cloud_vertices,cloud_vertices);
+                if(landscape_buffer) {
+                    context->IASetVertexBuffers(0,1,landscape_buffer.GetAddressOf(),&stride,&offset);
+                    context->Draw(landscape_vertex_count,0);
+                }
+                course_shadow_dirty=false;
+            }
+        }
+        context->OMSetRenderTargets(1,rtv.GetAddressOf(),dsv.Get());
+        context->RSSetViewports(1,&viewport); context->RSSetState(controls.wire?wire.Get():solid.Get());
+        if(car_shadow_view) {
+            context->PSSetShaderResources(8,1,car_shadow_view.GetAddressOf());
+            context->PSSetShaderResources(9,1,course_shadow_view.GetAddressOf());
+            context->PSSetSamplers(1,1,car_shadow_sampler.GetAddressOf());
+        }
         BackdropConstants surroundings{};
+        if(night_style) {
+            const float blend=environment.palette_weight/31.f;
+            surroundings.night_lighting=harbor_style ? 1.f-blend : cruise_style ? blend : 1.f;
+        }
+        if(forest_style || sea_style || white_land_style || lake_style || ravine_style || sky_ramp_style || harbor_style) {
+            surroundings.panorama_fog=environment.fog_weight/32.f;
+            const auto fog=environment.fog_rgb555;
+            surroundings.panorama_fog_color={float(fog&31)/31,float((fog>>5)&31)/31,float((fog>>10)&31)/31,0};
+        }
+        if(sunset_style) {
+            surroundings.sunset_valley=1;
+            surroundings.sunset_dusk=environment.palette_weight/31.f;
+        }
+        if(aqua_style) {
+            surroundings.aqua_meters=float(world_radius/90);
+            surroundings.aqua_plane_y=normalize_world({0,environment.alternate_backdrop?1280.f:-1280.f,0})[1];
+        }
         if(backdrop.available()) {
             // Preserve the original panorama's angular scale; widescreen reveals
             // more of it around the native chase camera's horizontal centre.
@@ -968,7 +1733,7 @@ private:
         context->UpdateSubresource(backdrop_constants.Get(),0,nullptr,&surroundings,0,0);
         context->VSSetConstantBuffers(1,1,backdrop_constants.GetAddressOf());
         context->PSSetConstantBuffers(1,1,backdrop_constants.GetAddressOf());
-        if(backdrop.available()) {
+        if(backdrop.available() || enhanced_scene) {
             context->RSSetState(sprite_solid.Get());
             context->IASetInputLayout(nullptr);
             context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -982,18 +1747,57 @@ private:
         context->PSSetShaderResources(0,1,texture_view.GetAddressOf());
         context->PSSetShaderResources(3,1,dusk_texture_view.GetAddressOf());
         context->PSSetShaderResources(4,1,palette_indices_view.GetAddressOf());
+        if(n64_mode)context->PSSetShaderResources(7,1,n64_tiles.GetAddressOf());
         context->PSSetSamplers(0,1,texture_sampler.GetAddressOf());
         context->IASetInputLayout(layout.Get());
         const UINT stride=sizeof(GpuVertex),offset=0;
         context->IASetVertexBuffers(0,1,vertices.GetAddressOf(),&stride,&offset);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        if(vehicle_depth_pass) {
-            context->Draw(world_vertex_count,0);
+        if(cloud_vertices) {
+            context->Draw(cloud_vertices,0);
+            context->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH,0,0);
+        }
+        const auto draw_landscape=[&] {
+            if(!landscape_buffer)return;
+            context->IASetVertexBuffers(0,1,landscape_buffer.GetAddressOf(),&stride,&offset);
+            context->RSSetState(controls.wire?wire.Get():sprite_solid.Get());
+            context->Draw(landscape_vertex_count,0);
+            context->RSSetState(controls.wire?wire.Get():solid.Get());
+            context->IASetVertexBuffers(0,1,vertices.GetAddressOf(),&stride,&offset);
+        };
+        const auto draw_world=[&] {
+            draw_landscape();
+            context->Draw(two_sided_world_start-cloud_vertices,cloud_vertices);
+            if(world_vertex_count>two_sided_world_start) {
+                context->RSSetState(controls.wire?wire.Get():sprite_solid.Get());
+                context->Draw(world_vertex_count-two_sided_world_start,two_sided_world_start);
+                context->RSSetState(controls.wire?wire.Get():solid.Get());
+            }
             if(world_line_count) {
                 context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
                 context->Draw(world_line_count,vertex_count);
                 context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             }
+        };
+        if(vehicle_depth_pass && value.isometric) {
+            // Clip scenery before drawing any racer, so all four keep solid
+            // silhouettes and the track beneath them still depth-tests normally.
+            draw_landscape();
+            context->Draw(rival_start-cloud_vertices,cloud_vertices);
+            context->Draw(surface_vertex_count-world_vertex_count,world_vertex_count);
+            if(world_line_count) {
+                context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+                context->Draw(world_line_count,vertex_count);
+                context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            }
+            value.cutaway=0;
+            value.shadow_origin[3]=0;
+            context->UpdateSubresource(constants.Get(),0,nullptr,&value,0,0);
+            context->Draw(two_sided_world_start-rival_start,rival_start);
+            context->RSSetState(controls.wire?wire.Get():sprite_solid.Get());
+            context->Draw(world_vertex_count-two_sided_world_start,two_sided_world_start);
+        } else if(vehicle_depth_pass) {
+            draw_world();
             // Preserve world color and its geometric self-occlusion, then rebuild
             // the actor occluders with the original road priority. No color or
             // geometry moves, and actual wall/car depth testing stays enabled.
@@ -1001,19 +1805,19 @@ private:
             context->OMSetBlendState(depth_only.Get(),nullptr,UINT_MAX);
             value.road_pass=1;
             context->UpdateSubresource(constants.Get(),0,nullptr,&value,0,0);
-            context->Draw(world_vertex_count,0);
-            if(world_line_count) {
-                context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
-                context->Draw(world_line_count,vertex_count);
-                context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            }
+            draw_world();
             context->OMSetBlendState(nullptr,nullptr,UINT_MAX);
             value.road_pass=0;
+            value.shadow_origin[3]=0;
             context->UpdateSubresource(constants.Get(),0,nullptr,&value,0,0);
             context->Draw(surface_vertex_count-world_vertex_count,world_vertex_count);
-        } else context->Draw(surface_vertex_count,0);
+        } else {
+            draw_landscape();
+            context->Draw(surface_vertex_count-cloud_vertices,cloud_vertices);
+        }
         context->RSSetState(controls.wire?wire.Get():sprite_solid.Get());
-        if(vertex_count>surface_vertex_count)context->Draw(vertex_count-surface_vertex_count,surface_vertex_count);
+        const UINT visible_start=surface_vertex_count+(race_camera.view==RaceCamera::cockpit?car_shadow_vertices:0);
+        if(vertex_count>visible_start)context->Draw(vertex_count-visible_start,visible_start);
         if(vehicle_depth_pass && line_count>world_line_count) {
             context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
             context->Draw(line_count-world_line_count,vertex_count+world_line_count);
@@ -1022,7 +1826,16 @@ private:
         // The eye contains the scene. Dashboard, screen-space rain and menu
         // overlays are authored for the flat desktop viewport.
         if(eye)return;
-        if(show_rain) {
+        if(weather_rain_ps && !underwater && (weather.rain>0 || ravine_wet)) {
+            context->OMSetRenderTargets(1,rtv.GetAddressOf(),nullptr);
+            context->RSSetState(sprite_solid.Get());
+            context->IASetInputLayout(nullptr);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->VSSetShader(backdrop_vs.Get(),nullptr,0);context->PSSetShader(weather_rain_ps.Get(),nullptr,0);
+            composite_overlay();context->Draw(3,0);
+            context->OMSetBlendState(nullptr,nullptr,UINT_MAX);
+        }
+        if(show_rain && (!ravine_style || n64_mode)) {
             context->OMSetRenderTargets(1,rtv.GetAddressOf(),nullptr);
             context->RSSetState(sprite_solid.Get());
             context->IASetInputLayout(nullptr);
@@ -1166,9 +1979,43 @@ float lerp_angle(unsigned before,unsigned after,float blend) {
     const auto delta=signed_word(static_cast<std::uint16_t>(after-before));
     return (float(before)+float(delta)*blend)*(6.28318530718f/65536.f);
 }
+using RoadTriangle=std::array<std::array<double,3>,3>;
+struct RoadSample {float y,dx,dz;};
+std::optional<RoadSample> road_at(std::span<const RoadTriangle> road,float x,float z,float reference_y) {
+    std::optional<RoadSample> nearest;
+    for(const auto& [a,b,c]:road) {
+        if(x<std::min({a[0],b[0],c[0]}) || x>std::max({a[0],b[0],c[0]}) ||
+           z<std::min({a[2],b[2],c[2]}) || z>std::max({a[2],b[2],c[2]}))continue;
+        const double ax=a[0]-c[0],az=a[2]-c[2],bx=b[0]-c[0],bz=b[2]-c[2];
+        const double det=ax*bz-bx*az;
+        if(std::abs(det)<1.e-6)continue;
+        const double u=((x-c[0])*bz-(z-c[2])*bx)/det,v=(ax*(z-c[2])-az*(x-c[0]))/det;
+        if(u<0 || v<0 || u+v>1)continue;
+        const double ay=a[1]-c[1],by=b[1]-c[1];
+        const float y=float(c[1]+u*ay+v*by);
+        // The road beneath the bridge and the deck can cover the same X/Z.
+        if(!nearest || std::abs(y-reference_y)<std::abs(nearest->y-reference_y))
+            nearest=RoadSample{y,float((ay*bz-by*az)/det),float((ax*by-bx*ay)/det)};
+    }
+    return nearest;
+}
+struct RivalWheelTravel {
+    std::array<float,4> previous{},current{};
+    void advance(const std::array<srf::Vehicle,4>& before,const std::array<srf::Vehicle,4>& after) {
+        previous=current;
+        for(unsigned i=0;i<srf::NativeRace::player_index();++i) {
+            const auto& a=before[i].body;const auto& b=after[i].body;
+            const float yaw=lerp_angle(a.word(0x24),b.word(0x24),.5f);
+            const int dx=std::int16_t(b.word(0x1e)-a.word(0x1e)),dz=std::int16_t(b.word(0x22)-a.word(0x22));
+            current[i]+=dz*std::cos(yaw)-dx*std::sin(yaw);
+        }
+    }
+};
 RenderVehicle vehicle_pose(const srf::Rom& rom,const srf::Vehicle& before,const srf::Vehicle& after,
-                           bool player,float blend,std::uint8_t camera_byte,bool exterior_eyes=true) {
+                           bool player,float blend,std::uint8_t camera_byte,bool exterior_eyes=true,
+                           std::optional<float> wheel_travel=std::nullopt,std::span<const RoadTriangle> road={},bool n64_rival=false) {
     RenderVehicle out;
+    out.player=player;
     const auto& a=before.body;
     const auto& b=after.body;
     const auto definition=0x48000+(b.word(0x66)&0x7fff);
@@ -1179,20 +2026,39 @@ RenderVehicle vehicle_pose(const srf::Rom& rom,const srf::Vehicle& before,const 
         out.position[axis]=float(old)+float(delta)*blend;
     }
     const auto yaw=-lerp_angle(a.word(0x24),b.word(0x24),blend);
-    const auto pitch=-lerp_angle(a.word(0x26),b.word(0x26),blend);
-    const auto roll=-lerp_angle(a.word(0x28),b.word(0x28),blend);
-    const auto sy=std::sin(yaw),cy=std::cos(yaw),sp=std::sin(pitch),cp=std::cos(pitch),sr=std::sin(roll),cr=std::cos(roll);
+    float pitch=-lerp_angle(a.word(0x26),b.word(0x26),blend),roll=-lerp_angle(a.word(0x28),b.word(0x28),blend);
+    const auto sy=std::sin(yaw),cy=std::cos(yaw);
+    if(wheel_travel) {
+        out.route_follow=std::lerp(float(bool(a.word(0x16)&0x400)),float(bool(b.word(0x16)&0x400)),blend);
+        if(out.route_follow>0) {
+            // The route controller moves between markers without following the
+            // intervening crest. Sample both axle lines to span the summit smoothly.
+            auto z=[](const auto& w){return signed_word(w.word(0x40));};
+            auto [rear,front]=std::minmax_element(after.wheels.begin(),after.wheels.end(),
+                [&](const auto& l,const auto& r){return z(l)<z(r);});
+            const auto axle=[&](float offset){return road_at(road,out.position[0]+sy*offset,
+                out.position[2]+cy*offset,out.position[1]+160);};
+            const auto back=axle(float(z(*rear))),nose=axle(float(z(*front)));
+            if(back && nose && z(*front)>z(*rear)) {
+                const float grade=std::atan2(back->y-nose->y,float(z(*front)-z(*rear)));
+                const float bank=std::atan(.5f*((back->dx+nose->dx)*cy-(back->dz+nose->dz)*sy)*std::cos(grade));
+                pitch+=out.route_follow*std::remainder(grade-pitch,6.2831853f);
+                roll+=out.route_follow*std::remainder(bank-roll,6.2831853f);
+            }
+        }
+    }
+    const auto sp=std::sin(pitch),cp=std::cos(pitch),sr=std::sin(roll),cr=std::cos(roll);
     out.orientation={sy*sr*sp+cy*cr,sr*cp,cy*sr*sp-sy*cr,
                      sy*cr*sp-cy*sr,cr*cp,cy*cr*sp+sy*sr,sy*cp,-sp,cy*cp};
+    const bool distant=(b.word(0x16)&0x400)!=0,was_distant=(a.word(0x16)&0x400)!=0;
+    const bool mounted_sprite=n64_rival && (was_distant || distant);
     for(unsigned wheel_index=0;wheel_index<4;++wheel_index) {
         const auto& wheel=after.wheels[wheel_index];
         // CPU08:BD32..BD54 hides far-controller wheel sprites. Their
-        // attachments intentionally retain stale yaw and collapse to body XYZ.
-        if(b.word(0x16)&0x400)continue;
-        const bool became_near=(a.word(0x16)&0x400)!=0;
-        // A newly visible tire has no valid previous attachment pose.
-        // Interpolating it would invent a large spin from stale far-AI data.
-        const auto& old=became_near?wheel:before.wheels[wheel_index];
+        // world positions collapse to the chassis and wheel angles go stale.
+        if(distant && !wheel_travel && !mounted_sprite)continue;
+        const auto& prior=before.wheels[wheel_index];
+        const auto& old=was_distant?wheel:prior;
         if(wheel.word(0x46)&0x200) continue; // Original08:BA70 skips hidden wheel definitions.
         const auto data=0x48000+wheel.word(0x12);
         const auto diameter_addition=rom.u16(data+4);
@@ -1200,12 +2066,47 @@ RenderVehicle vehicle_pose(const srf::Rom& rom,const srf::Vehicle& before,const 
         const auto sprite_base=std::size_t(sprite_descriptor&0x7fff);
         const float diameter=float(srf::original_sprite_diameter(rom.u16(sprite_base+16),rom.bytes()[sprite_base+7],std::uint8_t(diameter_addition)));
         RenderSprite sprite;
-        const auto wheel_yaw=srf::interpolated_angle_byte(old.word(0x24),wheel.word(0x24),blend);
-        const auto relative=std::uint8_t(wheel_yaw-camera_byte);
-        const auto wheel_roll=srf::wheel_sprite_bank(srf::interpolated_angle_byte(old.word(0x28),wheel.word(0x28),blend),relative);
-        sprite.table=rom.u16(data+2)+8+wheel_roll;
-        sprite.phase=rom.bytes()[0x44056+(relative>>2)];
+        sprite.wheel=true;
         sprite.diameter=diameter;
+        if(!wheel_travel) {
+            // Distant N64 sprites face with the chassis until steering resumes.
+            const auto& from=n64_rival && was_distant?a:old;
+            const auto& to=n64_rival && distant?b:wheel;
+            const auto wheel_yaw=srf::interpolated_angle_byte(from.word(0x24),to.word(0x24),blend);
+            const auto relative=std::uint8_t(wheel_yaw-camera_byte);
+            const auto roll=srf::interpolated_angle_byte(from.word(0x28),to.word(0x28),blend);
+            sprite.table=rom.u16(data+2)+8+srf::wheel_sprite_bank(roll,relative);
+            sprite.phase=rom.bytes()[0x44056+(relative>>2)];
+        }
+        if(wheel_travel || mounted_sprite) {
+            sprite.position=out.position;
+            for(unsigned axis=0;axis<3;++axis) {
+                float mount=0;
+                for(unsigned local=0;local<3;++local)
+                    mount+=signed_word(wheel.word(0x3c+local*2))*out.orientation[local*3+axis];
+                const auto pos=0x1e + axis*2;
+                if(mounted_sprite && was_distant!=distant) {
+                    // Blend to the live attachment at the near end of the handoff.
+                    float from=was_distant?mount:signed_word(std::uint16_t(prior.word(pos)-a.word(pos)));
+                    float to=distant?mount:signed_word(std::uint16_t(wheel.word(pos)-b.word(pos)));
+                    mount=std::lerp(from,to,blend);
+                }
+                const auto spring=0x4a+axis*2;
+                sprite.position[axis]+=mount+std::lerp(float(signed_word(prior.word(spring))),float(signed_word(wheel.word(spring))),blend);
+            }
+            sprite.position[1]-=float(diameter_addition+20);
+            if(wheel_travel) {
+                const auto steer=[](const auto& body,const auto& wheel) -> std::uint16_t {
+                    return (body.word(0x16)&0x400)?0:std::uint16_t(body.word(0x24)-wheel.word(0x24));
+                };
+                sprite.steer=lerp_angle(steer(a,prior),steer(b,wheel),blend);
+                sprite.spin=-*wheel_travel/n64::tire_radius(sprite);
+            }
+            out.sprites.push_back(sprite);
+            continue;
+        }
+        sprite.steer=-lerp_angle(old.word(0x24),wheel.word(0x24),blend)-yaw;
+        sprite.spin=lerp_angle(old.word(0x26),wheel.word(0x26),blend);
         // Original08:BF53..BF8A adds contact displacement, then raises
         // the center by the definition radius plus20 in original Y-down.
         for(unsigned axis=0;axis<3;++axis) {
@@ -1214,7 +2115,7 @@ RenderVehicle vehicle_pose(const srf::Rom& rom,const srf::Vehicle& before,const 
             };
             const auto start=value(old),end=value(wheel);
             sprite.position[axis]=float(signed_word(start))+float(signed_word(std::uint16_t(end-start)))*blend;
-            if(became_near)sprite.position[axis]+=out.position[axis]-float(signed_word(b.word(0x1e + axis*2)));
+            if(was_distant)sprite.position[axis]+=out.position[axis]-float(signed_word(b.word(0x1e + axis*2)));
         }
         sprite.position[1]-=float(diameter_addition+20);
         out.sprites.push_back(sprite);
@@ -1241,48 +2142,129 @@ RenderVehicle vehicle_pose(const srf::Rom& rom,const srf::Vehicle& before,const 
 
 std::array<RenderVehicle,4> vehicle_poses(const srf::Rom& rom,
     const std::array<srf::Vehicle,4>& before,const std::array<srf::Vehicle,4>& after,
-    std::size_t player,float blend,bool show_player_eyes=true) {
+    std::size_t player,float blend,bool show_player_eyes=true,const RivalWheelTravel* travel=nullptr,std::span<const RoadTriangle> road={},bool n64_rivals=false) {
     const auto camera_byte=srf::interpolated_angle_byte(before[player].body.word(0x24),after[player].body.word(0x24),blend);
     std::array<RenderVehicle,4> result{};
-    for(unsigned i=0;i<result.size();++i)
-        result[i]=vehicle_pose(rom,before[i],after[i],i==player,blend,camera_byte,i!=player || show_player_eyes);
+    for(unsigned i=0;i<result.size();++i) {
+        std::optional<float> distance;
+        if(travel && i!=player)distance=std::lerp(travel->previous[i],travel->current[i],blend);
+        result[i]=vehicle_pose(rom,before[i],after[i],i==player,blend,camera_byte,i!=player || show_player_eyes,distance,road,n64_rivals && i!=player);
+    }
     return result;
 }
-using RoadTriangle=std::array<std::array<double,3>,3>;
-std::vector<RoadTriangle> camera_surfaces(const srf::World& world,srf::CourseId course) {
+struct PresentationRoad {
+    struct Deck {
+        unsigned command;
+        std::size_t first;
+        std::vector<std::vector<RoadTriangle>> frames;
+    };
     std::vector<RoadTriangle> triangles;
+    std::vector<Deck> decks;
+
+    std::span<const RoadTriangle> sample(std::span<const srf::SceneryPose> bridges) {
+        for(const auto& deck:decks) {
+            auto pose=std::ranges::find(bridges,deck.command,&srf::SceneryPose::command_offset);
+            const auto& frame=deck.frames.at(pose==bridges.end()?0:pose->frame);
+            std::copy(frame.begin(),frame.end(),triangles.begin()+deck.first);
+        }
+        return triangles;
+    }
+};
+bool rival_driving_surface(srf::CourseId course,const srf::WorldInstance& instance,unsigned material) {
+    switch(course) {
+    case srf::CourseId::big_ravine:
+        if(instance.visual_descriptor==0xe368)return material==0xc9; // moving plank tops
+        return n64::graded_road(instance.opcode,material);
+    case srf::CourseId::harbor_city:
+        if(material==0xdf)return true; // submerged roadbed
+        [[fallthrough]];
+    case srf::CourseId::sea_breeze:
+        return n64::sea_breeze_road(instance.opcode,material);
+    case srf::CourseId::kings_forest:
+        if(instance.visual_descriptor==0xfa0c)return material==0xc9; // plank tops
+        if(instance.visual_descriptor==0xc1b8 || instance.visual_descriptor==0xc1d4)
+            return material==0x62 || material==0x63; // fixed approaches
+        [[fallthrough]];
+    case srf::CourseId::lake_side:
+        if(instance.visual_descriptor==0xc404)return material==0xd7; // textured deck tops
+        [[fallthrough]];
+    case srf::CourseId::sky_ramp:
+    case srf::CourseId::white_land:
+    case srf::CourseId::night_cruise:
+    case srf::CourseId::night_owl:
+    case srf::CourseId::sunset_valley:
+        return n64::graded_road(instance.opcode,material);
+    case srf::CourseId::aqua_tunnel:
+        return n64::aqua_driving_surface(instance.visual_descriptor,instance.opcode,material);
+    default:
+        return n64::asphalt_material(instance.visual_descriptor,material);
+    }
+}
+PresentationRoad presentation_surfaces(const srf::World& world,srf::CourseId course,bool seat_rivals) {
+    PresentationRoad road;
     const bool road_course=course==srf::CourseId::sky_ramp || course==srf::CourseId::harbor_city;
-    if(course!=srf::CourseId::lake_side && course!=srf::CourseId::big_ravine && !road_course)return triangles;
+    if(course!=srf::CourseId::lake_side && course!=srf::CourseId::big_ravine && !road_course && !seat_rivals)return road;
     for(const auto& instance:world.instances) {
         // Lake Side uses its banked descent. Big Ravine's two D54C hairpins
         // can put the eye behind the inner cliff while the car is on the road.
-        if(course==srf::CourseId::lake_side && instance.visual_descriptor!=0xf1d8 && instance.visual_descriptor!=0xf1bc)continue;
-        if(course==srf::CourseId::big_ravine && instance.visual_descriptor!=0xd54c)continue;
+        if(!seat_rivals && course==srf::CourseId::lake_side && instance.visual_descriptor!=0xf1d8 && instance.visual_descriptor!=0xf1bc)continue;
+        if(!seat_rivals && course==srf::CourseId::big_ravine && instance.visual_descriptor!=0xd54c)continue;
         if(road_course && instance.opcode!=2)continue;
         const auto model=std::find_if(world.models.begin(),world.models.end(),[&](const auto& m) {
             return m.descriptor_address==instance.visual_descriptor;
         });
         if(model==world.models.end())continue;
+        const bool moving=(course==srf::CourseId::big_ravine && instance.visual_descriptor==0xe368) ||
+                          (course==srf::CourseId::kings_forest && instance.visual_descriptor==0xfa0c) ||
+                          (course==srf::CourseId::lake_side && instance.visual_descriptor==0xc404);
+        if(moving)road.decks.push_back({instance.command_offset,road.triangles.size(),
+                                        std::vector<std::vector<RoadTriangle>>(model->frames.size())});
         for(const auto& face:model->primitives) {
             const auto material=face.attributes[2];
-            if(course==srf::CourseId::lake_side && material!=44 && material!=45)continue;
-            if(course==srf::CourseId::big_ravine && material!=0x5b && material!=0x5c)continue;
+            if(seat_rivals && !rival_driving_surface(course,instance,material))continue;
+            if(!seat_rivals && course==srf::CourseId::lake_side && material!=44 && material!=45)continue;
+            if(!seat_rivals && course==srf::CourseId::big_ravine && material!=0x5b && material!=0x5c)continue;
             if(course==srf::CourseId::sky_ramp && (material<43 || material>45))continue;
             // Include both outer lanes of the banks and the submerged roadbed.
             if(course==srf::CourseId::harbor_city && (material<0x29 || material>0x2f) && material!=0xdf)continue;
-            const auto point=[&](std::size_t i) {
-                return srf::world_position(model->frames.front().at(face.indices[i]),instance);
+            const auto append=[&](std::vector<RoadTriangle>& triangles,const std::vector<srf::Vertex>& vertices) {
+                const auto point=[&](std::size_t i) {return srf::world_position(vertices.at(face.indices[i]),instance);};
+                for(std::size_t i=2;i<face.indices.size();++i)triangles.push_back({point(0),point(i-1),point(i)});
             };
-            for(std::size_t i=2;i<face.indices.size();++i)
-                triangles.push_back({point(0),point(i-1),point(i)});
+            append(road.triangles,model->frames.front());
+            if(moving)for(std::size_t i=0;i<model->frames.size();++i)
+                append(road.decks.back().frames[i],model->frames[i]);
         }
     }
-    return triangles;
+    return road;
+}
+
+// The simulated tire contact includes the original sprite's vertical overlap.
+// Nearby suspension can leave the road. Route-driven rivals use the actual
+// road height in place of the route markers' fixed 160-unit body offset.
+void seat_opponents(std::span<RenderVehicle> cars,std::span<const RoadTriangle> road) {
+    for(auto& car:cars) {
+        if(car.player)continue;
+        std::optional<float> lift;
+        for(const auto& wheel:car.sprites)if(wheel.wheel) {
+            const auto [x,y,z]=wheel.position;
+            const float radius=n64::tire_radius(wheel);
+            if(const auto deck=road_at(road,x,z,y+radius)) {
+                const float depth=y+radius-deck->y;
+                const float suspension=depth<2*radius?std::max(0.f,depth):0.f;
+                const float correction=std::lerp(suspension,depth,car.route_follow);
+                lift=std::max(lift.value_or(correction),correction);
+            }
+        }
+        if(!lift)continue;
+        car.position[1]-=*lift;
+        for(auto& sprite:car.sprites)sprite.position[1]-=*lift;
+    }
 }
 // Slide the eye along the ravine wall. Keeping the target on the car lets it
 // remain visible even when driving parallel to a cliff at a tight bend.
-void clear_cliff_camera(const Renderer& renderer,const RenderVehicle& vehicle,float yaw,std::span<const RoadTriangle> cliffs) {
-    const float behind=900.f*std::cos(controls.pitch),lift=-900.f*std::sin(controls.pitch);
+void clear_cliff_camera(const Renderer& renderer,const RenderVehicle& vehicle,float yaw,std::span<const RoadTriangle> cliffs,float distance=900.f) {
+    const float behind=distance*std::cos(controls.pitch),lift=-distance*std::sin(controls.pitch);
     const double eye_y=vehicle.position[1]-30.f-lift;
     const double tx=vehicle.position[0],tz=vehicle.position[2];
     double x=tx+behind*std::sin(yaw),z=tz-behind*std::cos(yaw);
@@ -1328,13 +2310,42 @@ void chase_camera(const Renderer& renderer,const RenderVehicle& vehicle,float ya
     const auto target=renderer.normalize_world({vehicle.position[0],vehicle.position[1]-30,vehicle.position[2]});
     controls.target_x=target[0]; controls.target_y=target[1]; controls.target_z=target[2];
     controls.yaw=yaw; controls.pitch=-.18f; controls.zoom=2.f;
-    controls.distance=renderer.normalized_distance(900.f);
+    float distance=900.f;
+    controls.distance=renderer.normalized_distance(distance);
+    if(race_camera.enabled) {
+        const bool far_chase=race_camera.view==RaceCamera::far_chase;
+        controls.yaw+=race_camera.heading;
+        if(race_camera.mounted()) {
+            const bool cockpit=race_camera.view==RaceCamera::cockpit;
+            const std::array<float,3> eye=cockpit?std::array{-18.f,-85.f,-23.f}:std::array{0.f,-81.f,66.f};
+            auto mount=vehicle.position;
+            for(unsigned axis=0;axis<3;++axis)for(unsigned local=0;local<3;++local)
+                mount[axis]+=eye[local]*vehicle.orientation[local*3+axis];
+            const auto seat=renderer.normalize_world(mount);
+            controls.target_x=seat[0];controls.target_y=seat[1];controls.target_z=seat[2];
+            controls.pitch=std::asin(std::clamp(-vehicle.orientation[7],-1.f,1.f))-.10f+race_camera.tilt;
+            controls.distance=0;
+            controls.zoom=(cockpit?1.65f:1.35f)*race_camera.magnification;
+        } else {
+            controls.pitch=(far_chase?-.25f:-.18f)+race_camera.tilt;
+            distance=race_camera.starting_distance()/race_camera.magnification;
+            controls.distance=renderer.normalized_distance(distance);
+            if(course==srf::CourseId::big_ravine && race_camera.view!=RaceCamera::isometric)
+                clear_cliff_camera(renderer,vehicle,controls.yaw,road,distance);
+            if(race_camera.view==RaceCamera::isometric) {
+                controls.yaw=.78539816f;
+                controls.pitch=-.61547971f; // equal foreshortening of the three world axes
+            }
+        }
+        // Chase views need the same ramp clearance at the selected orbit and zoom.
+        if((course!=srf::CourseId::sky_ramp && course!=srf::CourseId::harbor_city) || race_camera.mounted() || race_camera.view==RaceCamera::isometric)return;
+    }
     if(road.empty())return;
     if(course==srf::CourseId::big_ravine){clear_cliff_camera(renderer,vehicle,yaw,road);return;}
-    const float behind=900.f*std::cos(controls.pitch);
-    const float x=vehicle.position[0]+behind*std::sin(yaw),z=vehicle.position[2]-behind*std::cos(yaw);
+    const float behind=distance*std::cos(controls.pitch);
+    const float x=vehicle.position[0]+behind*std::sin(controls.yaw),z=vehicle.position[2]-behind*std::cos(controls.yaw);
     const float target_y=vehicle.position[1]-30.f;
-    const float original_lift=-900.f*std::sin(controls.pitch);
+    const float original_lift=-distance*std::sin(controls.pitch);
     float lift=original_lift,target_lift=0;
     for(const auto& [a,b,c]:road) {
         const double det=(b[2]-c[2])*(a[0]-c[0])+(c[0]-b[0])*(a[2]-c[2]);
@@ -1431,12 +2442,18 @@ std::wstring race_status(const srf::NativeRace& race,double simulation_hz,bool c
 #include "course_map_window.inc"
 #include "boot_window.inc"
 #include "grid_countdown_art.hpp"
+#include "n64_hud.inc"
 #include "grid_countdown_view.inc"
 #include "rock_field_window.inc"
 #include "bonnet_drive.inc"
 
 int wmain(int argc,wchar_t** argv) {
-    bool launch_game=false,vr=false;
+    bool launch_game=false,vr=false,n64_low_raster=false;
+    RaceLook look=RaceLook::classic;
+    std::optional<unsigned> time_of_day,msaa;
+    std::optional<RaceWeather> weather;
+    std::optional<RaceCamera> camera;
+    std::optional<unsigned> camera_max_distance;
     std::filesystem::path screenshot;
     try {
         std::filesystem::path assets,world_path,rom_path,trace_path,input_path,controller_path,progress_path;
@@ -1455,6 +2472,50 @@ int wmain(int argc,wchar_t** argv) {
             else if(arg==L"--model" && i+1<argc) controls.model=std::stoul(argv[++i]);
             else if(arg==L"--descriptor" && i+1<argc) descriptor=std::stoul(argv[++i],nullptr,0);
             else if(arg==L"--race") controls.race=true;
+            else if(arg==L"--n64" || arg==L"--remastered") {
+                const auto requested=arg==L"--n64"?RaceLook::n64:RaceLook::remastered;
+                if(look!=RaceLook::classic && look!=requested)throw std::runtime_error("Choose one race look.");
+                look=requested;
+            }
+            else if(arg==L"--camera" && i+1<argc) {
+                const std::wstring view=argv[++i];
+                if(view==L"chase")camera=RaceCamera::chase;
+                else if(view==L"far-chase")camera=RaceCamera::far_chase;
+                else if(view==L"cockpit")camera=RaceCamera::cockpit;
+                else if(view==L"bonnet")camera=RaceCamera::bonnet;
+                else if(view==L"isometric")camera=RaceCamera::isometric;
+                else throw std::runtime_error("--camera requires chase, far-chase, cockpit, bonnet or isometric.");
+            }
+            else if(arg==L"--camera-max-distance" && i+1<argc) {
+                const std::wstring meters=argv[++i];
+                if(meters.empty() || meters.size()>3 || meters.find_first_not_of(L"0123456789")!=std::wstring::npos ||
+                   std::stoul(meters)<40 || std::stoul(meters)>160)
+                    throw std::runtime_error("--camera-max-distance requires 40 to 160 metres.");
+                camera_max_distance=std::stoul(meters);
+            }
+            else if(arg==L"--camera-look")race_camera.look=true;
+            else if(arg==L"--time-of-day" && i+1<argc) {
+                const std::wstring hour=argv[++i];
+                if(hour.empty() || hour.size()>2 || hour.find_first_not_of(L"0123456789")!=std::wstring::npos || std::stoul(hour)>23)
+                    throw std::runtime_error("--time-of-day requires an hour from 0 to 23.");
+                time_of_day=std::stoul(hour);
+            }
+            else if(arg==L"--weather" && i+1<argc) {
+                const std::wstring preset=argv[++i];
+                if(preset==L"clear")weather=RaceWeather{};
+                else if(preset==L"partly-cloudy")weather=RaceWeather{.46f,.0008f};
+                else if(preset==L"overcast")weather=RaceWeather{.90f,.0022f};
+                else if(preset==L"fog")weather=RaceWeather{.80f,.023f};
+                else if(preset==L"rain")weather=RaceWeather{1,.007f,1};
+                else throw std::runtime_error("--weather requires clear, partly-cloudy, overcast, fog or rain.");
+            }
+            else if(arg==L"--msaa" && i+1<argc) {
+                const std::wstring level=argv[++i];
+                if(level!=L"0" && level!=L"2" && level!=L"4" && level!=L"8")
+                    throw std::runtime_error("--msaa requires 0, 2, 4 or 8.");
+                msaa=std::stoul(level);
+            }
+            else if(arg==L"--n64-240p") n64_low_raster=true;
             else if(arg==L"--vr") vr=true;
             else if(arg==L"--game") { launch_game=true; controls.race=true; }
             else if(arg==L"--course" && i+1<argc) {
@@ -1494,10 +2555,19 @@ int wmain(int argc,wchar_t** argv) {
             else if(arg==L"--width" && i+1<argc) controls.width=std::stoul(argv[++i]);
             else if(arg==L"--height" && i+1<argc) controls.height=std::stoul(argv[++i]);
             else if(arg==L"--validate-assets") validate=true;
-            else throw std::runtime_error("Usage: srf_preview --assets <models.srfmesh> [--world <world.srfworld>] [--game | --race] [--rom <original.sfc> --course easy-ride|aqua-tunnel|sunset-valley|night-owl|kings-forest|sea-breeze|white-land|night-cruise|lake-side|big-ravine|sky-ramp|harbor-city --car 4wd|coupe|f-type] [--borderless] [--validate-assets | --screenshot <new.png>] [--steps count --control native_word --trace new.jsonl] [--replay-input controls.csv --restart-check] [--simulation-hz 14] [--controller-config path] [--model index --descriptor address --yaw radians --pitch radians --zoom factor --width pixels --height pixels]");
+            else throw std::runtime_error("Usage: srf_preview --assets <models.srfmesh> [--world <world.srfworld>] [--game | --race [--remastered [--time-of-day 0..23] [--msaa 0|2|4|8] [--weather preset] | --n64 [--n64-240p]]] [--rom <original.sfc> --course easy-ride|aqua-tunnel|sunset-valley|night-owl|kings-forest|sea-breeze|white-land|night-cruise|lake-side|big-ravine|sky-ramp|harbor-city --car 4wd|coupe|f-type] [--borderless] [--validate-assets | --screenshot <new.png>] [--steps count --control native_word --trace new.jsonl] [--replay-input controls.csv --restart-check] [--simulation-hz 14] [--controller-config path] [--model index --descriptor address --yaw radians --pitch radians --zoom factor --width pixels --height pixels]");
         }
-        if(vr && (launch_game || !controls.race || course!=srf::CourseId::easy_ride || player_car!=srf::PlayerCar::four_wd || !screenshot.empty() || validate || steps || restart_check || !trace_path.empty() || fixed_control))
-            throw std::runtime_error("Easy Ride VR requires an interactive 4WD race.");
+        race_camera.enabled=look==RaceLook::remastered;
+        if((camera || camera_max_distance || race_camera.look) && !race_camera.enabled)throw std::runtime_error("Camera settings require --remastered.");
+        if(camera_max_distance)race_camera.max_distance_m=*camera_max_distance;
+        race_camera.view=camera.value_or(RaceCamera::chase);
+        if((msaa || weather) && look!=RaceLook::remastered)throw std::runtime_error("--msaa and --weather require --remastered.");
+        if(time_of_day && look!=RaceLook::remastered)throw std::runtime_error("--time-of-day requires --remastered.");
+        if(n64_low_raster && look!=RaceLook::n64)throw std::runtime_error("--n64-240p requires --n64.");
+        if(look!=RaceLook::classic && (!controls.race || launch_game || vr || validate || player_car!=srf::PlayerCar::four_wd))
+            throw std::runtime_error("Enhanced styles require a desktop 4WD race.");
+        if(vr && (launch_game || !controls.race || (course!=srf::CourseId::easy_ride && course!=srf::CourseId::aqua_tunnel) || player_car!=srf::PlayerCar::four_wd || !screenshot.empty() || validate || steps || restart_check || !trace_path.empty() || fixed_control))
+            throw std::runtime_error("VR requires a 4WD race on Easy Ride or Aqua Tunnel.");
         if((desktop_fps && (desktop_fps<30 || desktop_fps>240)) || (vr_refresh && (vr_refresh<60 || vr_refresh>240)) ||
            vr_scale<50 || vr_scale>100 || (!vr && (vr_refresh || vr_scale!=100)) || (vr && desktop_fps))
             throw std::runtime_error("Invalid frame settings for the selected display mode.");
@@ -1640,10 +2710,14 @@ int wmain(int argc,wchar_t** argv) {
         std::array<float,3> grid_origin{};
         float grid_heading=0;
         std::string audio_failure;
-        const auto camera_road=controls.race?camera_surfaces(world,course):std::vector<RoadTriangle>{};
+        auto road=controls.race?presentation_surfaces(world,course,race_camera.enabled):PresentationRoad{};
+        // Ravine cliff faces constrain the chase eye. Only deck faces support rival tires.
+        const auto cliffs=race_camera.enabled && course==srf::CourseId::big_ravine
+            ?presentation_surfaces(world,course,false).triangles:std::vector<RoadTriangle>{};
         srf::RaceAudioState race_audio_state;
         srf::RaceAudioTuning race_audio_tuning;
         std::array<srf::Vehicle,4> previous{};
+        RivalWheelTravel rival_travel;
         std::ofstream trace;
         const auto recorded=input_path.empty()?std::vector<RecordedInput>{}:read_inputs(input_path);
         std::size_t input_index=0;
@@ -1719,6 +2793,7 @@ int wmain(int argc,wchar_t** argv) {
                 input=srf::prepare_player_input(race_audio_state,player_before,input,race->countdown_active(),input_events);
             else input=srf::filter_player_boost(player_before,input);
             previous=race->racers(); race->step(input,locked_grid_ticks?0:ticks,steering,halfway);
+            if(race_camera.enabled)rival_travel.advance(previous,race->racers());
             if(championship && race->completion().acknowledged_laps>previous_lap && previous_lap<lap_times.size()) {
                 const auto elapsed=race->elapsed_centiseconds();
                 lap_times[previous_lap]=elapsed-last_lap_end;
@@ -1797,9 +2872,9 @@ int wmain(int argc,wchar_t** argv) {
         }
         if(vr) {
             // The companion accepts keyboard controls. Only OpenXR drives presentation.
-            SetWindowTextW(window,L"Stunt Race FX — Easy Ride VR");
+            SetWindowTextW(window,(L"Stunt Race FX — "+course_name+L" VR").c_str());
             SetWindowPos(window,nullptr,0,0,560,154,SWP_NOMOVE|SWP_NOZORDER);
-            CreateWindowW(L"STATIC",L"Easy Ride is running in the headset.\r\nF2 / right stick: recenter     R / View: restart     P / Start: pause     Esc: exit",
+            CreateWindowW(L"STATIC",(course_name+L" is running in the headset.\r\nF2 / right stick: recenter     R / View: restart     P / Start: pause     Esc: exit").c_str(),
                 WS_CHILD|WS_VISIBLE,12,14,520,96,window,nullptr,GetModuleHandleW(nullptr),nullptr);
             ShowWindow(window,SW_SHOW);
             std::ofstream diagnostics(L"openxr-last-drive.log");
@@ -1807,6 +2882,7 @@ int wmain(int argc,wchar_t** argv) {
                 srf::vr::Drive drive(diagnostics,vr_refresh,vr_scale);
                 Renderer renderer(nullptr,drive.device());
                 renderer.set_course_colors(course_package); renderer.load_textures(sprites,dusk_sprites);
+                if(course==srf::CourseId::aqua_tunnel)renderer.load_backdrop(srf::extract_course_backdrop(*race_rom,course));
                 renderer.load_world(world,0);
                 try {audio=std::make_unique<srf::AudioDevice>(srf::extract_course_audio(*race_rom,course));
                     audio->update({},false,false,true,false);}
@@ -1821,7 +2897,9 @@ int wmain(int argc,wchar_t** argv) {
             } catch(const std::exception& e){diagnostics<<e.what()<<std::endl;throw;}
             if(IsWindow(window))DestroyWindow(window);CoUninitialize();return 0;
         }
-        Renderer renderer(window,nullptr,(window && race)?desktop_fps:0);
+        Renderer renderer(window,nullptr,(window && race)?desktop_fps:0,look,n64_low_raster,time_of_day.value_or(12),msaa.value_or(0),weather.value_or(RaceWeather{}),course);
+        std::optional<N64RaceHud> raster_hud;
+        if(n64_low_raster)raster_hud.emplace(*race_rom);
         renderer.set_course_colors(course_package);
         renderer.load_textures(sprites,dusk_sprites);
         if(race)renderer.load_backdrop(srf::extract_course_backdrop(*race_rom,course));
@@ -1829,14 +2907,17 @@ int wmain(int argc,wchar_t** argv) {
         if(!screenshot.empty()) {
             if(race) {
                 for(unsigned i=0;i<steps;++i) step_race(static_cast<std::uint16_t>(fixed_control));
-                const auto poses=vehicle_poses(*race_rom,previous,race->racers(),race->player_index(),1);
+                const auto camera_road=road.sample(race->bridge_poses());
+                auto poses=vehicle_poses(*race_rom,previous,race->racers(),race->player_index(),1,true,race_camera.enabled?&rival_travel:nullptr,camera_road,look==RaceLook::n64);
+                if(race_camera.enabled)seat_opponents(poses,camera_road);
                 const auto& b=race->racers()[race->player_index()].body;
-                chase_camera(renderer,poses[race->player_index()],lerp_angle(b.word(0x24),b.word(0x24),1),camera_road,course);
+                chase_camera(renderer,poses[race->player_index()],lerp_angle(b.word(0x24),b.word(0x24),1),cliffs.empty()?camera_road:std::span<const RoadTriangle>(cliffs),course);
                 renderer.set_environment(environment->presentation());
                 renderer.load_race_world(world,poses,*race_rom,*race,*scenery);
                 if(rain)renderer.set_rain(rain->pixels());
             }
-            renderer.render(); renderer.screenshot(screenshot,race&&!screenshot_no_hud?race_status(*race,simulation_hz):L"");
+            if(raster_hud)raster_hud->update(renderer,*race,!screenshot_no_hud);
+            renderer.render(); renderer.screenshot(screenshot,race&&!raster_hud&&!screenshot_no_hud?race_status(*race,simulation_hz):L"");
             if(race) {
                 const auto final=race->racers();const auto final_phase=race->phase();
                 const auto final_scenery=std::vector<srf::SceneryPose>(scenery->poses().begin(),scenery->poses().end());
@@ -1853,9 +2934,13 @@ int wmain(int argc,wchar_t** argv) {
                 const auto final_video=environment->video_state();
                 const auto finished=race->completion().finished;const auto failure=race->failure();
                 if(restart_check) {
+                    const auto standings=race->standings();
+                    const auto elapsed=race->elapsed_centiseconds();
+                    const auto remaining=race->remaining_seconds();
                     std::vector<srf::RainPixel> final_rain;
                     if(rain){final_rain.assign(rain->pixels().begin(),rain->pixels().end());rain->reset();}
                     race->reset();input_index=0;countdown_clock=0;previous=race->racers();race_audio_state={};
+                    rival_travel={};
                     scenery->reset();environment->reset();
                     phase_video_ticks=environment_video_ticks=0;
                     if(race->phase()!=0 || race->ended()) throw std::runtime_error("Native restart failed to reset race lifecycle");
@@ -1863,6 +2948,8 @@ int wmain(int argc,wchar_t** argv) {
                     for(unsigned i=0;i<steps;++i) step_race(static_cast<std::uint16_t>(fixed_control));
                     if(race->phase()!=final_phase || race->completion().finished!=finished || race->failure()!=failure)
                         throw std::runtime_error("Native restart repeat changed race outcome");
+                    if(race->standings()!=standings || race->elapsed_centiseconds()!=elapsed || race->remaining_seconds()!=remaining)
+                        throw std::runtime_error("Native restart repeat changed finishing order or race clock");
                     if(!std::equal(final_scenery.begin(),final_scenery.end(),scenery->poses().begin(),scenery->poses().end()) ||
                        !std::equal(final_rocks.begin(),final_rocks.end(),race->rock_poses().begin(),race->rock_poses().end()) ||
                        !std::equal(final_cones.begin(),final_cones.end(),race->cone_poses().begin(),race->cone_poses().end()) ||
@@ -1893,12 +2980,12 @@ int wmain(int argc,wchar_t** argv) {
             std::unique_ptr<srf::Gamepad> gamepad;
             std::string controller_failure;
             if(race) {
-                grid_instruments=grid_countdown.has_value();
+                grid_instruments=grid_countdown.has_value() || raster_hud.has_value();
                 hud_background=CreateSolidBrush(RGB(12,20,27));
                 race_hud=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|SS_LEFT|(race_hud_visible && !grid_instruments?WS_VISIBLE:0),12,12,std::max(200,int(controls.width)-24),112,window,nullptr,GetModuleHandleW(nullptr),nullptr);
                 hud_font=CreateFontW(18,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Segoe UI");
                 SendMessageW(race_hud,WM_SETFONT,reinterpret_cast<WPARAM>(hud_font),TRUE);
-                SetWindowTextW(window,(L"Stunt Race FX — "+course_name).c_str());
+                SetWindowTextW(window,(L"Stunt Race FX — "+course_name+(look==RaceLook::n64?L" (N64 mode)":look==RaceLook::remastered?L" Remastered":L"")).c_str());
                 controls.dirty=false;
                 try {
                     if(!audio) {
@@ -1948,7 +3035,12 @@ int wmain(int argc,wchar_t** argv) {
                 const float elapsed=std::min(.1f,float(double(now.QuadPart-last.QuadPart)/frequency.QuadPart));
                 if(race) {
                     const bool focused=GetForegroundWindow()==window && !IsIconic(window);
-                    const auto pad=gamepad?gamepad->poll(focused):srf::GamepadInput{};
+                    const auto pad=gamepad?gamepad->poll(focused,race_camera.look):srf::GamepadInput{};
+                    if(race_camera.look) {
+                        race_camera.rotate(pad.look_x*elapsed*2.3f,pad.look_y*elapsed*1.7f);
+                        if(controls.recenter || pad.recenter)race_camera.center();
+                        controls.recenter=false;
+                    }
                     if(pad.pause)controls.paused=!controls.paused;
                     if(pad.disconnected)controls.paused=true;
                     if(pad.restart)controls.restart=true;
@@ -1971,6 +3063,7 @@ int wmain(int argc,wchar_t** argv) {
                     }
                     if(controls.restart) {
                         race->reset();previous=race->racers();accumulator=0;countdown_clock=0;input_index=0;controls.restart=false;controls.paused=false;race_audio_state={};
+                        rival_travel={};
                         scenery->reset();environment->reset();
                         if(rain){rain->reset();rain_changed=true;}
                         phase_video_ticks=environment_video_ticks=0;
@@ -2026,10 +3119,12 @@ int wmain(int argc,wchar_t** argv) {
                         continue;
                     }
                     const float blend=controls.paused?1.f:float(accumulator*simulation_hz);
-                    auto poses=vehicle_poses(*race_rom,previous,race->racers(),race->player_index(),blend);
+                    const auto camera_road=road.sample(race->bridge_poses());
+                    auto poses=vehicle_poses(*race_rom,previous,race->racers(),race->player_index(),blend,true,race_camera.enabled?&rival_travel:nullptr,camera_road,look==RaceLook::n64);
+                    if(race_camera.enabled)seat_opponents(poses,camera_road);
                     const auto& a=previous[race->player_index()].body;
                     const auto& b=race->racers()[race->player_index()].body;
-                    chase_camera(renderer,poses[race->player_index()],lerp_angle(a.word(0x24),b.word(0x24),blend),camera_road,course);
+                    chase_camera(renderer,poses[race->player_index()],lerp_angle(a.word(0x24),b.word(0x24),blend),cliffs.empty()?camera_road:std::span<const RoadTriangle>(cliffs),course);
                     std::optional<unsigned> grid_seconds;
                     bool held_on_grid=false;
                     if(grid_countdown && !grid_countdown->finished()) {
@@ -2045,13 +3140,15 @@ int wmain(int argc,wchar_t** argv) {
                         grid_art->draw(grid_pixels,frame,*race);
                         renderer.set_bonus_overlay(grid_pixels,frame.brightness,1.f,40.f,grid_art->dashboard(frame,*race),
                                                    0,224,frame.banner_step>=0);
+                    } else if(raster_hud) {
+                        raster_hud->update(renderer,*race,race_hud_visible);
                     } else if(grid_instruments) {
                         grid_instruments=false;
                         renderer.clear_bonus_overlay();
                         ShowWindow(race_hud,race_hud_visible?SW_SHOWNA:SW_HIDE);
                     }
                     renderer.set_environment(environment->presentation());
-                    renderer.load_race_world(world,poses,*race_rom,*race,*scenery);
+                    renderer.load_race_world(world,poses,*race_rom,*race,*scenery,race->ended()?0.f:blend-1.f);
                     auto status=race_status(*race,simulation_hz,championship.has_value(),grid_seconds,held_on_grid);
                     if(championship) {
                         const auto league=srf::class_name(championship->league());

@@ -145,6 +145,11 @@ internal sealed class BuildPipeline(string source, Action<string> report)
                         "--course", course.Id, "--car", car, "--steps", "50", "--width", "960", "--height", "540",
                         "--restart-check", "--screenshot-no-hud", "--screenshot", Path.Combine(stage, $"preview-{course.Id}-{car}.png")], native, Log, cancel, toolchain);
                 var replay = Path.Combine(source, "tests", "fixtures", course.Id.Replace('-', '_') + "_clean_inputs.csv");
+                if (GameContent.SupportsEnhancedStyles(course.Id, "4wd"))
+                    foreach (var style in new[] { RaceStyle.N64, RaceStyle.Remastered })
+                        await RunAsync(executable, ["--world", world, "--course", course.Id, "--race", style == RaceStyle.N64 ? "--n64" : "--remastered", "--rom", Path.GetFullPath(rom),
+                        "--replay-input", replay, "--steps", course.Id switch { "aqua-tunnel" => "380", "sunset-valley" => "1391", "night-owl" => "388", "kings-forest" => "1853", "sea-breeze" => "505", "white-land" => "1994", "night-cruise" => "1609", "lake-side" => "458", "big-ravine" => "605", "sky-ramp" => "1165", "harbor-city" => "2200", _ => "245" }, "--width", "960", "--height", "540", "--screenshot-no-hud",
+                        "--screenshot", Path.Combine(stage, GameContent.StylePreview(course.Id, style, GameContent.CurrentVersion))], native, Log, cancel, toolchain);
                 var result = await RunAsync(executable, ["--world", world, "--race", "--rom", Path.GetFullPath(rom),
                     "--course", course.Id, "--car", "4wd", "--replay-input", replay, "--restart-check",
                     "--screenshot", Path.Combine(stage, $"race-check-{course.Id}.png")], native, Log, cancel, toolchain);
@@ -289,7 +294,9 @@ internal sealed class BuildPipeline(string source, Action<string> report)
 
     public static Process Launch(string output, bool inspectModels = false, int width = 1280, int height = 720,
         string car = "4wd", bool borderless = false, string course = GameContent.DefaultCourse, bool game = false, bool vr = false,
-        int desktopFps = 0, int vrRefresh = 0, int vrScale = 100)
+        int desktopFps = 0, int vrRefresh = 0, int vrScale = 100, RaceStyle style = RaceStyle.Original, bool n64LowRaster = false,
+        int remasteredHour = 12, int remasteredMsaa = 0, string remasteredWeather = "clear",
+        string remasteredCamera = "chase", bool cameraLook = false, int maxCameraDistance = GameContent.DefaultCameraDistance)
     {
         var record = LastSuccess(output) ?? throw new InvalidOperationException("Build the game from Game files first.");
         var stage = Path.Combine(Path.GetFullPath(output), "builds", record.Directory);
@@ -302,14 +309,65 @@ internal sealed class BuildPipeline(string source, Action<string> report)
         }
         else
         {
-            if (vr && (game || record.ContentVersion < 28)) throw new InvalidOperationException("Rebuild for Easy Ride VR.");
-            if (vr) info.ArgumentList.Add("--vr");
-            foreach (var arg in FrameArguments(record.ContentVersion, vr, desktopFps, vrRefresh, vrScale)) info.ArgumentList.Add(arg);
-            if (game || vr)
+            if (vr)
             {
-                course = GameContent.DefaultCourse;
-                car = "4wd";
+                var selected = GameContent.Course(course);
+                if (game || selected.VrVersion is not int minimum || record.ContentVersion < minimum)
+                    throw new InvalidOperationException($"This build does not support {selected.Name} in VR.");
+                info.ArgumentList.Add("--vr");
             }
+            foreach (var arg in FrameArguments(record.ContentVersion, vr, desktopFps, vrRefresh, vrScale)) info.ArgumentList.Add(arg);
+            if (style != RaceStyle.Original && (game || vr || !GameContent.SupportsEnhancedStyles(course, car)))
+                throw new InvalidOperationException("Choose a desktop 4WD Quick Race for an enhanced visual style.");
+            if (style != RaceStyle.Original && record.ContentVersion < GameContent.StyleVersion(course, style))
+                throw new InvalidOperationException($"Rebuild from Game files to enable this visual style on {GameContent.Course(course).Name}.");
+            if (style == RaceStyle.N64)
+            {
+                info.ArgumentList.Add(record.ContentVersion >= GameContent.N64CommandVersion ? "--n64" : "--remastered");
+                if (n64LowRaster)
+                {
+                    if (record.ContentVersion < GameContent.N64RasterVersion)
+                        throw new InvalidOperationException("Rebuild from Game files to enable the 320 × 240 N64 raster.");
+                    info.ArgumentList.Add("--n64-240p");
+                }
+            }
+            if (style == RaceStyle.Remastered)
+            {
+                info.ArgumentList.Add("--remastered");
+                if (remasteredCamera == "isometric" && record.ContentVersion < GameContent.IsometricVersion)
+                    throw new InvalidOperationException("Rebuild from Game files to use the Isometric camera.");
+                if (record.ContentVersion >= GameContent.IsometricVersion)
+                {
+                    if (maxCameraDistance is < GameContent.MinCameraDistance or > GameContent.MaxCameraDistance)
+                        throw new ArgumentOutOfRangeException(nameof(maxCameraDistance));
+                    info.ArgumentList.Add("--camera-max-distance");
+                    info.ArgumentList.Add(maxCameraDistance.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                }
+                if (record.ContentVersion >= GameContent.CameraVersion)
+                {
+                    if (!GameContent.CameraIds.Contains(remasteredCamera)) throw new ArgumentOutOfRangeException(nameof(remasteredCamera));
+                    info.ArgumentList.Add("--camera");
+                    info.ArgumentList.Add(remasteredCamera);
+                    if (cameraLook) info.ArgumentList.Add("--camera-look");
+                }
+                if (record.ContentVersion >= GameContent.AtmosphereVersion)
+                {
+                    if (remasteredMsaa is not (0 or 2 or 4 or 8)) throw new ArgumentOutOfRangeException(nameof(remasteredMsaa));
+                    if (!GameContent.WeatherIds.Contains(remasteredWeather)) throw new ArgumentOutOfRangeException(nameof(remasteredWeather));
+                    info.ArgumentList.Add("--msaa");
+                    info.ArgumentList.Add(remasteredMsaa.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    info.ArgumentList.Add("--weather");
+                    info.ArgumentList.Add(remasteredWeather);
+                }
+                if (record.ContentVersion >= GameContent.SunLightingVersion)
+                {
+                    if (remasteredHour is < 0 or > 23) throw new ArgumentOutOfRangeException(nameof(remasteredHour));
+                    info.ArgumentList.Add("--time-of-day");
+                    info.ArgumentList.Add(remasteredHour.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                }
+            }
+            if (game) course = GameContent.DefaultCourse;
+            if (game || vr) car = "4wd";
             var contentArguments = ContentArguments(record, car, borderless, course);
             var entryPoint = EntryPointArgument(record, game);
             var world = Path.Combine(GameContent.AssetDirectory(stage, course), "world.srfworld");
