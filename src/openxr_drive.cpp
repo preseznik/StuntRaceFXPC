@@ -39,37 +39,6 @@ XrPosef seat_origin(XrPosef head) {
     head.orientation={0,std::sin(yaw/2),0,std::cos(yaw/2)};
     return head;
 }
-constexpr int hud_width=960,hud_height=148;
-class HudBitmap {
-    HDC dc=CreateCompatibleDC(nullptr);
-    HBITMAP bitmap{};
-    HFONT font{};
-    HGDIOBJ old_bitmap{},old_font{};
-    void* bits{};
-public:
-    HudBitmap() {
-        BITMAPINFO info{};auto& h=info.bmiHeader;
-        h.biSize=sizeof(h);h.biWidth=hud_width;h.biHeight=-hud_height;h.biPlanes=1;h.biBitCount=32;
-        bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
-        font=CreateFontW(-43,0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
-                         ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Segoe UI");
-        if(!dc || !bitmap || !font)throw std::runtime_error("Could not create VR instruments");
-        old_bitmap=SelectObject(dc,bitmap);old_font=SelectObject(dc,font);SetBkMode(dc,TRANSPARENT);
-    }
-    ~HudBitmap(){SelectObject(dc,old_font);SelectObject(dc,old_bitmap);DeleteObject(font);DeleteObject(bitmap);DeleteDC(dc);}
-    const void* paint(const Display& hud) {
-        RECT bounds{0,0,hud_width,hud_height};FillRect(dc,&bounds,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-        RECT top{12,4,hud_width-12,74},bottom{12,74,hud_width-12,144};
-        SetTextColor(dc,RGB(255,255,255));
-        DrawTextW(dc,hud.instruments.c_str(),-1,&top,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
-        SetTextColor(dc,RGB(218,218,218));
-        DrawTextW(dc,hud.message.c_str(),-1,&bottom,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
-        GdiFlush();
-        auto* pixels=static_cast<uint32_t*>(bits);
-        for(int i=0;i<hud_width*hud_height;++i)pixels[i]|=0xff000000;
-        return bits;
-    }
-};
 struct Images {
     XrSwapchain chain{};
     XrSwapchainSubImage area{};
@@ -137,10 +106,11 @@ struct Drive::Impl {
     XrSessionState state=XR_SESSION_STATE_UNKNOWN;
     ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;
     DXGI_FORMAT format{};
-    Images eyes[2],hud;
-    HudBitmap bitmap;
-    Display last;
-    bool running=false,quit=false,recenter=true,have_hud=false;
+    Images eyes[2],panel;
+    std::vector<uint32_t> panel_bgra;
+    uint64_t panel_frames{};
+    std::vector<uint32_t> last_hud;
+    bool running=false,quit=false,recenter=true,seat_ready=false,was_panel=false;
     XrTime space_change{};
     uint64_t frames{},projections{},recenters{},missed_periods{};
     GpuFrameTime gpu_time;
@@ -154,12 +124,13 @@ struct Drive::Impl {
     Impl(std::ostream& stream,unsigned hz,unsigned scale):log(stream),preferred_hz(hz),eye_scale_percent(scale){}
     ~Impl(){
         if(context)context->ClearState();
-        for(auto* item:{&hud,&eyes[1],&eyes[0]})if(item->chain)xrDestroySwapchain(item->chain);
+        for(auto* item:{&panel,&eyes[1],&eyes[0]})if(item->chain)xrDestroySwapchain(item->chain);
         for(auto space:{head,seat,local})if(space)xrDestroySpace(space);
         if(session)xrDestroySession(session);
         if(instance)xrDestroyInstance(instance);
         log<<"Frames "<<frames<<", stereo submissions "<<projections<<", recenters "<<recenters
            <<", skipped predicted display periods "<<missed_periods<<std::endl;
+        if(panel_frames)log<<"Menu panel submissions "<<panel_frames<<std::endl;
         if(projections)log<<"App work before submission (includes image waits): mean "<<draw_ns/1e6/projections
             <<" ms, worst "<<peak_draw_ns/1e6<<" ms, over predicted period "<<long_draws<<std::endl;
         if(gpu_time.samples)log<<"Stereo GPU time ("<<gpu_time.samples<<" samples): mean "<<gpu_time.total_ms/gpu_time.samples
@@ -219,7 +190,6 @@ struct Drive::Impl {
         if(!format)throw std::runtime_error("No supported headset color format");
         const auto scaled=[&](uint32_t size){return std::max(1u,(size*eye_scale_percent+50)/100);};
         for(int i=0;i<2;++i)eyes[i].create(session,scaled(config[i].recommendedImageRectWidth),scaled(config[i].recommendedImageRectHeight),format,false);
-        hud.create(session,hud_width,hud_height,format,true);
         log<<"Eye targets "<<eyes[0].area.imageRect.extent.width<<'x'<<eyes[0].area.imageRect.extent.height
            <<" and "<<eyes[1].area.imageRect.extent.width<<'x'<<eyes[1].area.imageRect.extent.height<<" at "<<eye_scale_percent<<"%"<<std::endl;
     }
@@ -255,14 +225,14 @@ struct Drive::Impl {
             log<<"Session state "<<int(state)<<std::endl;
             if(state==XR_SESSION_STATE_READY){
                 XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO,nullptr,stereo};
-                require(xrBeginSession(session,&begin),"Beginning stereo session");running=true;last_time=0;recenter=true;
+                require(xrBeginSession(session,&begin),"Beginning stereo session");running=true;last_time=0;recenter=true;seat_ready=false;
                 if(refresh_extension)request_refresh();
             }else if(state==XR_SESSION_STATE_STOPPING){
                 require(xrEndSession(session),"Ending stereo session");running=false;
             }else if(state==XR_SESSION_STATE_EXITING || state==XR_SESSION_STATE_LOSS_PENDING)quit=true;
         }
     }
-    void frame(const Update& update,const Draw& draw){
+    void frame(const Update& update,const Draw& draw,std::span<const uint32_t> pixels={}){
         XrFrameState f{XR_TYPE_FRAME_STATE};XrFrameWaitInfo w{XR_TYPE_FRAME_WAIT_INFO};XrFrameBeginInfo b{XR_TYPE_FRAME_BEGIN_INFO};
         require(xrWaitFrame(session,&w,&f),"Waiting for headset frame");
         require(xrBeginFrame(session,&b),"Beginning headset frame");++frames;
@@ -274,11 +244,16 @@ struct Drive::Impl {
                 missed_periods+=(f.predictedDisplayTime-last_time+period/2)/period-1;
             last_time=f.predictedDisplayTime;
             if(space_change && f.predictedDisplayTime>=space_change){recenter=true;space_change=0;}
-            if(recenter && f.shouldRender){
+            // A runtime may expose a valid estimated pose before the headset is worn.
+            // Seat the driver from a focused, tracked pose, including when leaving menus.
+            if(was_panel && pixels.empty())recenter=true;
+            was_panel=!pixels.empty();
+            if(recenter && f.shouldRender && state==XR_SESSION_STATE_FOCUSED){
                 XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};require(xrLocateSpace(head,local,f.predictedDisplayTime,&loc),"Locating seated head");
-                const auto valid=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
-                if((loc.locationFlags&valid)==valid){
-                    auto next=space(XR_REFERENCE_SPACE_TYPE_LOCAL,seat_origin(loc.pose));xrDestroySpace(seat);seat=next;recenter=false;++recenters;
+                const auto tracked=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT|
+                                   XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT|XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+                if((loc.locationFlags&tracked)==tracked){
+                    auto next=space(XR_REFERENCE_SPACE_TYPE_LOCAL,seat_origin(loc.pose));xrDestroySpace(seat);seat=next;seat_ready=true;recenter=false;++recenters;
                 }
             }
             XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO,nullptr,stereo,f.predictedDisplayTime,seat};
@@ -286,34 +261,56 @@ struct Drive::Impl {
             XrViewState vs{XR_TYPE_VIEW_STATE};uint32_t count{};
             if(f.shouldRender)require(xrLocateViews(session,&locate,&vs,2,&count,views),"Locating eyes at display time");
             const auto valid=XR_VIEW_STATE_POSITION_VALID_BIT|XR_VIEW_STATE_ORIENTATION_VALID_BIT;
-            const bool visible=f.shouldRender && count==2 && (vs.viewStateFlags&valid)==valid;
+            const bool visible=seat_ready && f.shouldRender && count==2 && (vs.viewStateFlags&valid)==valid;
             auto display=update(f.predictedDisplayTime,visible && state==XR_SESSION_STATE_FOCUSED);
             recenter|=display.recenter;
             XrCompositionLayerProjectionView pv[2]={{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
             XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION,nullptr,0,seat,2,pv};
-            XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD,nullptr,0,seat,XR_EYE_VISIBILITY_BOTH,hud.area,
-                                       {{0,0,0,1},{0,-.37f,-1.45f}},{1.03f,1.03f*hud_height/hud_width}};
+            XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD,nullptr,0,seat,XR_EYE_VISIBILITY_BOTH,{},
+                                       {{0,0,0,1},{0,-.06f,-1.45f}},{1.6f,1.2f}};
             const XrCompositionLayerBaseHeader* layers[]={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
                                                          reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
-            if(visible){
+            const auto upload_panel=[&](std::span<const uint32_t> image) {
+                if(image.size()!=256*224)throw std::runtime_error("Invalid headset panel size");
+                if(!panel.chain)panel.create(session,256,224,format,true);
+                if(format==DXGI_FORMAT_B8G8R8A8_UNORM || format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB){
+                    panel_bgra.resize(image.size());
+                    std::transform(image.begin(),image.end(),panel_bgra.begin(),[](uint32_t c){
+                        return (c&0xff00ff00u)|((c&255)<<16)|((c>>16)&255);
+                    });
+                    image=panel_bgra;
+                }
+                panel.write([&](auto target){context->UpdateSubresource(target,0,nullptr,image.data(),256*4,0);});
+                quad.subImage=panel.area;
+            };
+            if(visible && !pixels.empty()){
+                upload_panel(pixels);last_hud.clear();
+                quad.pose.position={0,0,-1.6f};
+                end.layerCount=1;end.layers=layers+1;++panel_frames;
+            }else if(visible){
                 const bool timing=gpu_time.begin(context.Get(),projections);
                 for(int i=0;i<2;++i){
                     pv[i].pose=views[i].pose;pv[i].fov=views[i].fov;pv[i].subImage=eyes[i].area;
-                    eyes[i].write([&](auto texture){draw(texture,format,scene_eye(views[i]));context->OMSetRenderTargets(0,nullptr,nullptr);});
+                    auto eye=scene_eye(views[i]);eye.second=(i==1);
+                    eyes[i].write([&](auto texture){draw(texture,format,eye);context->OMSetRenderTargets(0,nullptr,nullptr);});
                 }
                 if(timing)gpu_time.end(context.Get());
-                if(!have_hud || display.instruments!=last.instruments || display.message!=last.message){
-                    auto pixels=bitmap.paint(display);
-                    hud.write([&](auto texture){context->UpdateSubresource(texture,0,nullptr,pixels,hud_width*4,0);});
-                    have_hud=true;last=display;
+                end.layerCount=1;end.layers=layers;++projections;
+                if(!display.race_hud.empty()){
+                    if(!std::equal(last_hud.begin(),last_hud.end(),display.race_hud.begin(),display.race_hud.end())){
+                        upload_panel(display.race_hud);
+                        last_hud.assign(display.race_hud.begin(),display.race_hud.end());
+                    }
+                    quad.subImage=panel.area;
+                    quad.layerFlags=XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+                    end.layerCount=2;
                 }
-                end.layerCount=2;end.layers=layers;++projections;
                 const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count();
                 draw_ns+=ns;peak_draw_ns=std::max(peak_draw_ns,uint64_t(ns));long_draws+=ns>period;
             }
             // Layer structures must remain alive through xrEndFrame.
             auto result=xrEndFrame(session,&end);end.type=XR_TYPE_UNKNOWN;require(result,"Submitting stereo frame");
-            if(visible && state==XR_SESSION_STATE_FOCUSED){
+            if(visible && pixels.empty() && state==XR_SESSION_STATE_FOCUSED){
                 const auto now=std::chrono::steady_clock::now();
                 if(last_submission!=std::chrono::steady_clock::time_point{}){
                     submission_seconds+=std::chrono::duration<double>(now-last_submission).count();++submission_intervals;
@@ -326,10 +323,14 @@ struct Drive::Impl {
 Drive::Drive(std::ostream& log,unsigned hz,unsigned scale):impl(std::make_unique<Impl>(log,hz,scale)){impl->initialize();}
 Drive::~Drive()=default;
 ID3D11Device* Drive::device() const{return impl->device.Get();}
+bool Drive::focused() const {return impl->state==XR_SESSION_STATE_FOCUSED;}
+bool Drive::step(const Update& update,const Draw& draw,std::span<const uint32_t> panel){
+    impl->events();
+    if(impl->quit)return false;
+    if(impl->running)impl->frame(update,draw,panel);else Sleep(10);
+    return true;
+}
 void Drive::run(const std::function<bool()>& pump,const Update& update,const Draw& draw){
-    while(pump()){
-        impl->events();if(impl->quit)break;
-        if(impl->running)impl->frame(update,draw);else Sleep(10);
-    }
+    while(pump() && step(update,draw)){}
 }
 }

@@ -84,6 +84,16 @@ std::optional<std::uint32_t> ChampionshipProgress::best_split(SpeedClass league,
     return std::accumulate(splits.begin(), splits.begin() + rounds, 0U);
 }
 
+std::optional<std::uint32_t> ChampionshipProgress::course_best(CourseId course) const {
+    const auto time = course_bests_.at(static_cast<unsigned>(course));
+    return time ? std::optional(time) : std::nullopt;
+}
+
+void ChampionshipProgress::record_course(CourseId course, std::uint32_t time) {
+    auto& best = course_bests_.at(static_cast<unsigned>(course));
+    if (time && (!best || time < best)) best = time;
+}
+
 void ChampionshipProgress::record(SpeedClass league, const ChampionshipRecord& entry) {
     const auto index = static_cast<unsigned>(league);
     insert_time(records_.at(index), entry);
@@ -107,7 +117,7 @@ ChampionshipProgress ChampionshipProgress::load(const std::filesystem::path& fil
     std::istringstream stream(std::string(bytes.data(), length));
     std::string header;
     unsigned version = 0, count = 0;
-    if (!(stream >> header >> version >> count) || header != "SPEED-TRAX" || version != 1 ||
+    if (!(stream >> header >> version >> count) || header != "SPEED-TRAX" || (version < 1 || version > 3) ||
         count > class_names.size() * records_per_class) invalid_save();
     ChampionshipProgress progress;
     for (unsigned i = 0; i < count; ++i) {
@@ -122,10 +132,64 @@ ChampionshipProgress ChampionshipProgress::load(const std::filesystem::path& fil
         auto& times = progress.records_[league];
         if (times.size() == records_per_class || (!times.empty() && times.back().total() > entry.total()))
             invalid_save();
+        for (unsigned round = 0; round < courses_per_class; ++round)
+            progress.record_course(courses[league * courses_per_class + round].id, entry.course_times[round]);
         times.push_back(std::move(entry));
+    }
+    if (version >= 2) {
+        if (!(stream >> header) || header != "BESTS") invalid_save();
+        for (const auto& course : courses) {
+            std::uint32_t time;
+            if (!(stream >> time) || time > 59999) invalid_save();
+            progress.record_course(course.id, time);
+        }
+    }
+    if (version == 3) {
+        unsigned count;
+        if (!(stream >> header >> progress.checkpoint_revision_ >> count) || header != "RESUME" || count > 3)
+            invalid_save();
+        if (count) {
+            unsigned league, car, spares, carry, bonus;
+            std::string initials;
+            if (!(stream >> league >> car >> std::quoted(initials) >> spares >> carry >> bonus) ||
+                league >= class_names.size() || car > 2 || !valid_initials(initials) ||
+                spares > 255 || carry > 99 || bonus > 1 || (bonus && count != 2)) invalid_save();
+            auto& session = progress.checkpoint_.emplace(static_cast<SpeedClass>(league), static_cast<PlayerCar>(car), initials);
+            session.completed_ = count;
+            session.round_index_ = count - bonus;
+            session.spares_ = static_cast<std::uint8_t>(spares);
+            session.carry_seconds_ = static_cast<std::uint16_t>(carry);
+            session.outcome_ = bonus ? ChampionshipOutcome::bonus : ChampionshipOutcome::racing;
+            const auto read_grid = [&] {
+                GridOrder grid{};
+                for (auto& place : grid) if (!(stream >> place)) invalid_save();
+                auto sorted = grid;
+                std::sort(sorted.begin(), sorted.end());
+                if (sorted != GridOrder{1,2,3,4}) invalid_save();
+                return grid;
+            };
+            for (unsigned i = 0; i < count; ++i) {
+                auto& race = session.qualified_[i];
+                race.course = courses[league * courses_per_class + i].id;
+                if (!(stream >> race.place >> race.remaining_seconds >> race.elapsed_centiseconds) ||
+                    race.place < 1 || race.place > 3 || !race.elapsed_centiseconds || race.elapsed_centiseconds > 59999)
+                    invalid_save();
+                race.finishing_places = read_grid();
+            }
+            if (session.round_index_ >= 2) session.saved_grid_ = read_grid();
+        }
     }
     if (!(stream >> header) || header != "END" || (stream >> header)) invalid_save();
     return progress;
+}
+
+void ChampionshipProgress::set_checkpoint(std::optional<Championship> session) {
+    if (session && session->outcome() == ChampionshipOutcome::next_race) session->advance();
+    if (session && (session->results().empty() ||
+        (session->outcome() != ChampionshipOutcome::racing && session->outcome() != ChampionshipOutcome::bonus)))
+        throw std::logic_error("A checkpoint must be between championship rounds");
+    checkpoint_ = std::move(session);
+    checkpoint_changed_ = true;
 }
 
 void ChampionshipProgress::save(const std::filesystem::path& file) {
@@ -142,9 +206,16 @@ void ChampionshipProgress::save(const std::filesystem::path& file) {
     auto merged = *this;
     if (std::filesystem::exists(file)) {
         merged = load(file);
+        if (checkpoint_changed_ && checkpoint_revision_ == merged.checkpoint_revision_) {
+            merged.checkpoint_ = checkpoint_;
+            ++merged.checkpoint_revision_;
+        }
+        for (const auto& course : courses) merged.record_course(course.id, course_bests_[static_cast<unsigned>(course.id)]);
         for (unsigned i = 0; i < pending_.size(); ++i)
             for (const auto& entry : pending_[i]) insert_time(merged.records_[i], entry);
     }
+    else if (checkpoint_changed_) ++merged.checkpoint_revision_;
+    merged.checkpoint_changed_ = false;
     merged.pending_ = {};
     std::size_t count = 0;
     for (const auto& times : merged.records_) count += times.size();
@@ -153,7 +224,7 @@ void ChampionshipProgress::save(const std::filesystem::path& file) {
     {
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         output.exceptions(std::ios::badbit | std::ios::failbit);
-        output << "SPEED-TRAX 1 " << count << '\n';
+        output << "SPEED-TRAX 3 " << count << '\n';
         for (unsigned i = 0; i < merged.records_.size(); ++i) {
             for (const auto& entry : merged.records_[i]) {
                 output << i << ' ' << static_cast<unsigned>(entry.car) << ' ' << std::quoted(entry.initials);
@@ -161,7 +232,22 @@ void ChampionshipProgress::save(const std::filesystem::path& file) {
                 output << '\n';
             }
         }
-        output << "END\n";
+        output << "BESTS";
+        for (const auto time : merged.course_bests_) output << ' ' << time;
+        const auto& checkpoint = merged.checkpoint_;
+        output << "\nRESUME " << merged.checkpoint_revision_ << ' ' << (checkpoint ? checkpoint->completed_ : 0);
+        if (checkpoint) {
+            const auto& session = *checkpoint;
+            output << ' ' << unsigned(session.league_) << ' ' << unsigned(session.car_) << ' ' << std::quoted(session.initials_)
+                   << ' ' << unsigned(session.spares_) << ' ' << session.carry_seconds_ << ' '
+                   << (session.outcome_ == ChampionshipOutcome::bonus);
+            for (const auto& race : session.results()) {
+                output << '\n' << race.place << ' ' << race.remaining_seconds << ' ' << race.elapsed_centiseconds;
+                for (const auto place : race.finishing_places) output << ' ' << place;
+            }
+            if (session.saved_grid_) for (const auto place : *session.saved_grid_) output << ' ' << place;
+        }
+        output << "\nEND\n";
         output.close();
     }
     if (!MoveFileExW(temporary.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
@@ -196,6 +282,7 @@ ChampionshipOutcome Championship::finish(const RoundResult& race, ChampionshipPr
         (race.place < 1 || race.place > 4 || !race.elapsed_centiseconds || race.elapsed_centiseconds > 59999))
         throw std::invalid_argument("Invalid championship finish");
 
+    if (race.failure == RaceFailure::none && !race.retired) progress.record_course(race.course, race.elapsed_centiseconds);
     previous_best_ = progress.best_split(league_, round());
     if (race.retired || race.failure != RaceFailure::none || race.place == 4) {
         outcome_ = spares_ ? ChampionshipOutcome::retry : ChampionshipOutcome::game_over;

@@ -8,5 +8,4 @@ struct StuntRecord {
     std::string initials;
     PlayerCar car = PlayerCar::four_wd;
 };
-enum class StuntMenuReturn { game_selection, course, car };
 }

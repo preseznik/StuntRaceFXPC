@@ -1,4 +1,5 @@
 #include "bonus_dashboard.hpp"
+#include "race_hud_text.hpp"
 #include "bonus_hud_map.hpp"
 #include "bonus_hud_boost.hpp"
 #include "bonus_tally_art.hpp"
@@ -44,6 +45,7 @@ class TrailerLoadingView {
     srf::BonusHudMap map;
     srf::BonusHudBoost boost;
     srf::BonusDashboard dashboard;
+    srf::RaceHudText notices;
     srf::BonusTallyArt tally_art;
     const std::vector<std::uint8_t> signal;
     std::vector<std::uint32_t> art;
@@ -96,7 +98,7 @@ public:
     float eye_x{},eye_z{};
     TrailerLoadingView(const srf::Rom& source,srf::SpeedClass group,srf::PlayerCar car)
         :rom(source),timing(schedules[static_cast<unsigned>(group)][static_cast<unsigned>(car)]),
-         league(static_cast<unsigned>(group)),car_index(static_cast<unsigned>(car)),map(rom,group),boost(rom,league),dashboard(rom,car),
+         league(static_cast<unsigned>(group)),car_index(static_cast<unsigned>(car)),map(rom,group),boost(rom,league),dashboard(rom,car),notices(rom),
          tally_art(rom),signal(srf::extract_start_light_tiles(rom)),art(208*128),palette(srf::bonus_hud_palette(rom,0xf8960)) {}
     unsigned drive_tick() const {return timing.drive;}
     unsigned music_tick() const {return timing.music;}
@@ -144,7 +146,7 @@ public:
         const auto raw_yaw=static_cast<std::uint16_t>(std::lround(-controls.yaw/radians));
         return static_cast<std::uint8_t>(-(raw_yaw>>8));
     }
-    void overlay(Renderer& renderer,unsigned tick,const srf::SpeedBonus& event,unsigned spares,bool show_hud,const srf::BonusTally* tally) {
+    void overlay(Renderer& renderer,unsigned tick,const srf::SpeedBonus& event,unsigned spares,bool show_hud,const srf::BonusTally* tally,bool paused=false) {
         std::fill(art.begin(),art.end(),0);
         const auto panel=show_hud?dashboard.draw(displayed_speed,event.truck().body.word(0x82),spares):std::span<const std::uint32_t>{};
         if(tally && !tally->driving_sprites_visible()) {
@@ -221,6 +223,7 @@ public:
         };
         const auto& changes=palette_ticks[league];
         const auto step=unsigned(std::upper_bound(std::begin(changes),std::end(changes),tick)-std::begin(changes));
+        if(paused)notices.draw(art,"PAUSED",60);
         renderer.set_bonus_overlay(art,brightness,std::min(32u,1+3*step)/32.f,warning?52.f:40.f,panel);
     }
 };

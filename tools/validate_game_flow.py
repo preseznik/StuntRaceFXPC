@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -15,6 +16,7 @@ user = c.WinDLL("user32", use_last_error=True)
 kernel = c.WinDLL("kernel32", use_last_error=True)
 callback = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
 user.EnumWindows.argtypes = [callback, w.LPARAM]
+user.EnumChildWindows.argtypes = [w.HWND, callback, w.LPARAM]
 user.GetWindowThreadProcessId.argtypes = [w.HWND, c.POINTER(w.DWORD)]
 user.GetWindowThreadProcessId.restype = w.DWORD
 user.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, c.c_int]
@@ -32,9 +34,9 @@ user.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
 user.IsWindowVisible.argtypes = [w.HWND]
 user.IsWindow.argtypes = [w.HWND]
 
-BOOT = "StuntRaceFXBoot"
-CLASS_BOARD = "StuntRaceFXClassBoard"
-RACE = "StuntRaceFXMeshInspector"
+BOOT = "StuntRaceFXGame"
+CLASS_BOARD = BOOT
+RACE = BOOT
 START = 0x0D
 ESCAPE = 0x1B
 
@@ -55,8 +57,53 @@ def wait_for(description, probe, timeout=20):
     raise AssertionError(f"Timed out waiting for {description}")
 
 
+def private_desktop():
+    user.GetThreadDesktop.argtypes = [w.DWORD]
+    user.GetThreadDesktop.restype = w.HANDLE
+    user.GetUserObjectInformationW.argtypes = [w.HANDLE, c.c_int, w.LPVOID, w.DWORD, c.POINTER(w.DWORD)]
+    name = c.create_unicode_buffer(128)
+    needed = w.DWORD()
+    desktop = user.GetThreadDesktop(kernel.GetCurrentThreadId())
+    return bool(user.GetUserObjectInformationW(desktop, 2, name, c.sizeof(name), c.byref(needed))
+                and name.value.startswith("SRF-Navigation-"))
+
+
+def run_on_private_desktop(helper):
+    if not private_desktop():
+        command = [helper.resolve(strict=True), sys.executable, *sys.argv]
+        raise SystemExit(subprocess.run(command, stdout=sys.stdout, stderr=sys.stderr,
+                                              creationflags=subprocess.CREATE_NO_WINDOW).returncode)
+
+
+def dashboard_labels(image, low_raster=False, split=None):
+    """Sample the cartridge panel's fixed label row, excluding changing digits."""
+    from PIL import Image
+    width, height = image.size
+    if low_raster:
+        w = min(width, height*4/3)
+        h = w*3/4
+        image = image.resize((320, 240), Image.Resampling.NEAREST,
+                             box=((width-w)/2, (height-h)/2, (width+w)/2, (height+h)/2))
+        width, height = image.size
+    if split is not None:
+        image = image.crop((0, split*(height//2), width, (split+1)*(height//2)))
+        width, height = image.size
+    scale = min(width/256, height/168)
+    left = (width-256*scale)/2
+    top = height-round(40*scale)
+    return image.convert("RGB").resize((256, 12), Image.Resampling.NEAREST,
+                                        box=(left, top, width-left, top+12*scale))
+
+
+def pixel_difference(first, second):
+    from PIL import ImageChops, ImageStat
+    return sum(ImageStat.Stat(ImageChops.difference(first, second)).mean)/3
+
+
 class GameFlow:
-    def __init__(self, pid):
+    def __init__(self, pid, directory=None):
+        self.directory = directory
+        self.isolated = private_desktop()
         self.pid = pid
         self.checks = []
         self.start = time.monotonic()
@@ -102,7 +149,7 @@ class GameFlow:
 
     def focus(self, hwnd):
         assert self.owned(hwnd)
-        if user.GetForegroundWindow() == hwnd:
+        if self.isolated or user.GetForegroundWindow() == hwnd:
             return
         current = kernel.GetCurrentThreadId()
         foreground = user.GetForegroundWindow()
@@ -130,6 +177,24 @@ class GameFlow:
             assert user.PostMessageW(hwnd, 0x0101, vk, 0xC0000001)
         time.sleep(.07)
 
+    def frame(self, hwnd):
+        from PIL import Image, ImageGrab
+        assert self.owned(hwnd)
+        if self.isolated:
+            path = self.directory / "navigation-frame.png"
+            path.unlink(missing_ok=True)
+            assert user.PostMessageW(hwnd, 0x8001, 0, 0)
+            wait_for("navigation renderer readback (use srf_navigation_preview)", path.is_file, 5)
+            with Image.open(path) as image:
+                return image.convert("RGB")
+        # ImageGrab returns the window (including chrome). Sample only its client area.
+        frame = ImageGrab.grab(window=hwnd)
+        client, window, origin = w.RECT(), w.RECT(), w.POINT()
+        assert user.GetClientRect(hwnd, c.byref(client)) and user.GetWindowRect(hwnd, c.byref(window))
+        assert user.ClientToScreen(hwnd, c.byref(origin))
+        x, y = origin.x-window.left, origin.y-window.top
+        return frame.crop((x,y,x+client.right,y+client.bottom))
+
     def record(self, step, hwnd, hud=None):
         item = {"step": step, "wall_seconds": round(time.monotonic() - self.start, 3),
                 "window": window_text(hwnd)}
@@ -150,7 +215,7 @@ class GameFlow:
             raise AssertionError(f"{error}; last HUD: {last}") from error
 
     def race(self, name, championship):
-        window = self.window(RACE)
+        window = wait_for(name + " race HUD", lambda: (h if (h := self.find_window(RACE)) and user.GetDlgItem(h, 0) else None))
         self.focus(window)
         action = "R retire" if championship else "R restart"
         grid = self.hud(window, f"{name} grid", lambda s: all(
@@ -194,7 +259,7 @@ class GameFlow:
         self.record("Interrupted demo opened Game Selection", game)
         return game
 
-    def championship(self, idle_demo=False):
+    def start_novice(self, idle_demo=False):
         title = self.window(BOOT, "Stunt Race FX")
         self.focus(title)
         self.record("Nintendo splash and title window", title)
@@ -216,23 +281,27 @@ class GameFlow:
         time.sleep(2.35)  # Class input opens on VBlank 119.
         play = self.confirm_to(board, CLASS_BOARD, "Play")
         self.record("Play / Cancel", play)
-        self.confirm_to(play, RACE, None)
+        self.key(play, START)
+        return wait_for("Novice race HUD", lambda: (play if user.GetDlgItem(play, 0) else None))
+
+    def championship(self, idle_demo=False):
+        self.start_novice(idle_demo)
         race = self.race("Easy Ride", championship=True)
         self.key(race, ESCAPE)
         returned = self.window(BOOT, "Game Selection")
         self.record("Returned from championship", returned)
         self.key(returned, ESCAPE)
 
-    def quick_race(self, course):
+    def quick_race(self, course, reference):
         race = self.race(course, championship=False)
-        status = user.GetDlgItem(race, 0)
-        def visible():
-            return bool(user.GetWindowLongW(status, -16) & 0x10000000)
-        initial = visible()
-        self.key(race, ord("H"))
-        assert visible() != initial
-        self.key(race, ord("H"))
-        assert visible() == initial
+        for step, shown in (("visible", True), ("hidden", False), ("restored", True)):
+            if step != "visible":
+                self.key(race, ord("H"))
+            def matches():
+                diff = pixel_difference(reference, dashboard_labels(self.frame(race)))
+                return (diff,) if (diff < 5 if shown else diff > 35) else None
+            difference, = wait_for("rendered dashboard " + step, matches, 5)
+            self.record(f"Dashboard {step} (label pixel difference {difference:.2f})", race)
         self.key(race, ord("P"))
         self.hud(race, "paused race", lambda s: "PAUSED" in s)
         self.key(race, ord("R"))
@@ -240,32 +309,49 @@ class GameFlow:
                         lambda s: "START LIGHTS" in s and "PAUSED" not in s and "Time 0:00.00" in s)
         self.record("Status toggle, pause and restart", race, grid)
         self.key(race, ESCAPE)
+        assert self.window(BOOT, "Quick Race") == race
+        self.key(race, ESCAPE)
+        assert self.window(BOOT, "Game Selection") == race
+        self.key(race, ESCAPE)
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--private-desktop", type=Path, help="Run on a private desktop with the navigation test build")
+    parser.add_argument("--quick-only", action="store_true")
     parser.add_argument("--idle-demo", action="store_true")
     for name in ("exe", "generated", "rom", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     args = parser.parse_args()
+    if args.private_desktop:
+        run_on_private_desktop(args.private_desktop)
+    user.SetProcessDPIAware()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     exe, rom = args.exe.resolve(strict=True), args.rom.resolve(strict=True)
     world = (args.generated / "harbor-city" / "world.srfworld").resolve(strict=True)
     result = {"executable": str(exe), "sha256": hashlib.sha256(exe.read_bytes()).hexdigest()}
     with tempfile.TemporaryDirectory(dir=args.output.parent) as temporary:
-        for mode in ("game", "race"):
+        from PIL import Image
+        directory = Path(temporary).resolve()
+        reference = directory / "reference.png"
+        subprocess.run([exe, "--race", "--world", world, "--course", "harbor-city", "--car", "coupe",
+                        "--rom", rom, "--width", "960", "--height", "540", "--steps", "90",
+                        "--screenshot", reference], check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        with Image.open(reference) as image:
+            labels = dashboard_labels(image)
+        for mode in (("race",) if args.quick_only else ("game", "race")):
             cmd = [str(exe), f"--{mode}", "--world", str(world), "--course", "harbor-city",
                    "--car", "coupe", "--rom", str(rom), "--width", "960", "--height", "540"]
             if mode == "game":
                 cmd.extend(["--progress-file", str(Path(temporary).resolve() / "speed-trax.dat")])
-            proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW,
+            proc = subprocess.Popen(cmd, cwd=directory, creationflags=subprocess.CREATE_NO_WINDOW,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            flow = GameFlow(proc.pid)
+            flow = GameFlow(proc.pid, directory)
             try:
                 if mode == "game":
                     flow.championship(args.idle_demo)
                 else:
-                    flow.quick_race("Harbor City")
+                    flow.quick_race("Harbor City", labels)
                 stdout, stderr = proc.communicate(timeout=10)
                 assert proc.returncode == 0, (proc.returncode, stdout, stderr)
                 result[mode] = {"checks": flow.checks, "exit_code": proc.returncode}
@@ -277,7 +363,7 @@ def main():
                     proc.kill()
                     proc.communicate(timeout=5)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    print(f"Passed championship and Quick Race flow. {args.output}")
+    print(f"Game flow checks passed. {args.output}")
 
 
 if __name__ == "__main__":

@@ -98,7 +98,7 @@ struct Reader {
     }
 };
 bool supported_music_extent(std::size_t bytes) {
-    return bytes==4532 || bytes==4361 || bytes==2434 || bytes==3427 || bytes==2273 || bytes==2691 || bytes==2297 || bytes==2408 || bytes==4020 || bytes==1803 || bytes==855 || bytes==4510;
+    return bytes==4532 || bytes==4361 || bytes==2434 || bytes==3427 || bytes==2273 || bytes==2691 || bytes==2297 || bytes==2408 || bytes==4020 || bytes==3985 || bytes==1803 || bytes==855 || bytes==4510;
 }
 void validate(const SoundBank& bank) {
     need(bank.instruments.size()==27 || bank.instruments.size()==29,"Invalid instrument count");
@@ -157,6 +157,9 @@ SoundBank extract_course_audio(const Rom& rom,CourseId course) {
 SoundBank extract_speed_bonus_audio(const Rom& rom) {
     // All three Bonus Trax entries select the same song, instruments and effects.
     return extract_indexed_audio(rom,20,CourseId::easy_ride);
+}
+SoundBank extract_local_audio(const Rom& rom,unsigned index) {
+    return extract_indexed_audio(rom,index,CourseId::easy_ride);
 }
 SoundBank extract_stunt_audio(const Rom& rom,StuntCourse course) {
     return extract_indexed_audio(rom,stunt_rom_index(course),CourseId::easy_ride);

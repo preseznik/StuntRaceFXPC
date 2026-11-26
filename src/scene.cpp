@@ -46,6 +46,9 @@ Scene extract_scene(const Rom& rom, std::uint32_t start_offset) {
         ++scene.command_count;
         if(op==4) { ++p; ended=true; break; }
         if(op==8) orientation=command[1];
+        if(op==0x12 && command[1]>=1 && command[1]<=4)
+            scene.grid[command[1]-1]=GridSlot{position_at(rom,p+2),command[8]};
+        if(op==0x14)scene.surface_flags|=rom.u16(p+1);
         if(op==2 || op==10 || op==12 || op==14 || op==16) {
             const auto descriptor = rom.u16(p+9);
             // Zero descriptors use original template/callback logic that is still

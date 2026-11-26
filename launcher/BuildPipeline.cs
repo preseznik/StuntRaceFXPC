@@ -300,12 +300,36 @@ internal sealed class BuildPipeline(string source, Action<string> report)
         string car = "4wd", bool borderless = false, string course = GameContent.DefaultCourse, bool game = false, bool vr = false,
         int desktopFps = 0, int vrRefresh = 0, int vrScale = 100, RaceStyle style = RaceStyle.Original, bool n64LowRaster = false,
         int remasteredHour = 12, int remasteredMsaa = 0, string remasteredWeather = "clear",
-        string remasteredCamera = "chase", bool cameraLook = false, int maxCameraDistance = GameContent.DefaultCameraDistance)
+        string remasteredCamera = "chase", bool cameraLook = false, int maxCameraDistance = GameContent.DefaultCameraDistance, bool classicSnes = false, bool hideRaceHud = false, bool rayTracedShadows = false, bool rayTracedReflections = false, bool rayTracedIndirect = false,
+        bool materialRoughness = false, bool carClearCoat = false, bool highDetailRoad = false, bool highDetailScenery = false, int shadowRays = 4, bool wetTireSpray = false, bool volumetricLighting = false, bool smoothVrMotion = true, LanGrid? lan = null, string? lanCapture = null, bool lanCaptureHandoff = false)
     {
         var record = LastSuccess(output) ?? throw new InvalidOperationException("Build the game from Game files first.");
         var stage = Path.Combine(Path.GetFullPath(output), "builds", record.Directory);
         var info = new ProcessStartInfo(Path.Combine(stage, "native", "srf_preview.exe"))
         { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.Combine(stage, "native") };
+        if (lan != null)
+        {
+            if (game || vr || !GameContent.LanCourseVersions.TryGetValue(course, out var minimum) || record.ContentVersion < Math.Max(minimum,GameContent.FourDriverLanVersion))
+                throw new InvalidOperationException("Build the current game from Game files to play this LAN course.");
+            info.RedirectStandardInput = info.RedirectStandardOutput = true;
+            info.StandardInputEncoding = new UTF8Encoding(false);
+            info.ArgumentList.Add("--lan-seat");
+            info.ArgumentList.Add(lan.Seat.ToString());
+            if (lan.DropIn) info.ArgumentList.Add("--lan-drop-in");
+            foreach (var model in lan.Cars)
+            {
+                info.ArgumentList.Add("--grid-car");
+                info.ArgumentList.Add(model);
+            }
+            car = lan.Cars[lan.Seat];
+            if (lanCapture != null)
+            {
+                info.ArgumentList.Add("--screenshot");
+                info.ArgumentList.Add(Path.GetFullPath(lanCapture));
+                info.Environment["SRF_TEST_WARP"] = "1";
+                if (lanCaptureHandoff) info.ArgumentList.Add("--lan-screenshot-at-join");
+            }
+        }
         if (inspectModels)
         {
             info.ArgumentList.Add("--assets");
@@ -316,19 +340,27 @@ internal sealed class BuildPipeline(string source, Action<string> report)
             if (vr)
             {
                 var selected = GameContent.Course(course);
-                if (game || selected.VrVersion is not int minimum || record.ContentVersion < minimum)
+                if (game ? record.ContentVersion < GameContent.SeamlessVersion : !GameContent.SupportsVr(selected, car, record.ContentVersion))
                     throw new InvalidOperationException($"This build does not support {selected.Name} in VR.");
                 info.ArgumentList.Add("--vr");
+                if (!smoothVrMotion && record.ContentVersion >= GameContent.VrStyleVersion) info.ArgumentList.Add("--vr-native-motion");
             }
             foreach (var arg in FrameArguments(record.ContentVersion, vr, desktopFps, vrRefresh, vrScale)) info.ArgumentList.Add(arg);
-            if (style != RaceStyle.Original && (game || vr || !GameContent.SupportsEnhancedStyles(course, car)))
-                throw new InvalidOperationException("Choose a desktop Quick Race for an enhanced visual style.");
-            if (style != RaceStyle.Original && record.ContentVersion < GameContent.StyleVersion(course, car, style))
+            if (vr && style != RaceStyle.Original && record.ContentVersion < GameContent.VrStyleVersion)
+                throw new InvalidOperationException("Rebuild from Game files to use enhanced visual styles in VR.");
+            if (!game && style != RaceStyle.Original && !GameContent.SupportsEnhancedStyles(course, car))
+                throw new InvalidOperationException("This race does not support an enhanced visual style.");
+            if (game && style != RaceStyle.Original && record.ContentVersion < GameContent.ChampionshipStyleVersion)
+                throw new InvalidOperationException("Rebuild from Game files to enable visual styles in Speed Trax.");
+            if (!game && style != RaceStyle.Original && record.ContentVersion < GameContent.StyleVersion(course, car, style))
                 throw new InvalidOperationException($"Rebuild from Game files to enable this visual style on {GameContent.Course(course).Name}.");
+            if (hideRaceHud && record.ContentVersion >= GameContent.RaceHudVersion) info.ArgumentList.Add("--hide-race-hud");
+            if (classicSnes && !vr && style == RaceStyle.Original && record.ContentVersion >= GameContent.ClassicRasterVersion)
+                info.ArgumentList.Add("--classic-snes");
             if (style == RaceStyle.N64)
             {
                 info.ArgumentList.Add(record.ContentVersion >= GameContent.N64CommandVersion ? "--n64" : "--remastered");
-                if (n64LowRaster)
+                if (n64LowRaster && !vr)
                 {
                     if (record.ContentVersion < GameContent.N64RasterVersion)
                         throw new InvalidOperationException("Rebuild from Game files to enable the 320 × 240 N64 raster.");
@@ -338,16 +370,42 @@ internal sealed class BuildPipeline(string source, Action<string> report)
             if (style == RaceStyle.Remastered)
             {
                 info.ArgumentList.Add("--remastered");
+                if (volumetricLighting && record.ContentVersion >= GameContent.VolumetricLightingVersion)
+                    info.ArgumentList.Add("--volumetric-lighting");
+                if (wetTireSpray && record.ContentVersion >= GameContent.WetTireSprayVersion)
+                    info.ArgumentList.Add("--wet-tire-spray");
+                if (highDetailScenery && record.ContentVersion >= GameContent.ForestSceneryVersion)
+                    info.ArgumentList.Add("--high-detail-scenery");
+                if (highDetailRoad && record.ContentVersion >= GameContent.RoadDetailVersion)
+                    info.ArgumentList.Add("--high-detail-road");
+                if (record.ContentVersion >= GameContent.MaterialFinishVersion)
+                {
+                    if (materialRoughness) info.ArgumentList.Add("--material-roughness");
+                    if (carClearCoat) info.ArgumentList.Add("--car-clear-coat");
+                }
+                if (rayTracedIndirect && record.ContentVersion >= GameContent.IndirectLightVersion)
+                    info.ArgumentList.Add("--ray-traced-indirect");
+                if (rayTracedReflections && record.ContentVersion >= GameContent.RayReflectionsVersion)
+                    info.ArgumentList.Add("--ray-traced-reflections");
+                if (rayTracedShadows && record.ContentVersion >= GameContent.RayShadowsVersion)
+                {
+                    info.ArgumentList.Add("--ray-traced-shadows");
+                    if (record.ContentVersion >= GameContent.SunsetSceneryVersion)
+                    {
+                        info.ArgumentList.Add("--shadow-rays");
+                        info.ArgumentList.Add(shadowRays switch { 1 => "1", 2 => "2", _ => "4" });
+                    }
+                }
                 if (remasteredCamera == "isometric" && record.ContentVersion < GameContent.IsometricVersion)
                     throw new InvalidOperationException("Rebuild from Game files to use the Isometric camera.");
-                if (record.ContentVersion >= GameContent.IsometricVersion)
+                if (!vr && record.ContentVersion >= GameContent.IsometricVersion)
                 {
                     if (maxCameraDistance is < GameContent.MinCameraDistance or > GameContent.MaxCameraDistance)
                         throw new ArgumentOutOfRangeException(nameof(maxCameraDistance));
                     info.ArgumentList.Add("--camera-max-distance");
                     info.ArgumentList.Add(maxCameraDistance.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 }
-                if (record.ContentVersion >= GameContent.CameraVersion)
+                if (!vr && record.ContentVersion >= GameContent.CameraVersion)
                 {
                     if (!GameContent.CameraIds.Contains(remasteredCamera)) throw new ArgumentOutOfRangeException(nameof(remasteredCamera));
                     info.ArgumentList.Add("--camera");
@@ -371,7 +429,7 @@ internal sealed class BuildPipeline(string source, Action<string> report)
                 }
             }
             if (game) course = GameContent.DefaultCourse;
-            if (game || vr) car = "4wd";
+            if (game) car = "4wd";
             var contentArguments = ContentArguments(record, car, borderless, course);
             var entryPoint = EntryPointArgument(record, game);
             var world = Path.Combine(GameContent.AssetDirectory(stage, course), "world.srfworld");
@@ -391,7 +449,7 @@ internal sealed class BuildPipeline(string source, Action<string> report)
                 "--controller-config", ControllerProfile.FilePath(output) })
                 info.ArgumentList.Add(argument);
             foreach (var argument in contentArguments) info.ArgumentList.Add(argument);
-            if (game && record.ContentVersion >= 13)
+            if ((game && record.ContentVersion >= 13) || record.ContentVersion >= GameContent.SeamlessVersion)
             {
                 info.ArgumentList.Add("--progress-file");
                 info.ArgumentList.Add(Path.Combine(Path.GetFullPath(output), "speed-trax.sav"));

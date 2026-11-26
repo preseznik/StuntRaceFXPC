@@ -20,6 +20,43 @@ Word absolute_word(Word value) { return signed_word(value)<0?Word(0U-value):valu
 constexpr std::array<std::uint8_t,14> command_lengths{0,22,1,1,2,25,22,26,24,9,3,4,4,3};
 }
 
+CourseBridges::CourseBridges(const Rom& rom,const Scene& scene,std::span<const CollisionShape> shapes,const StreamingCourse& streaming) {
+    for(const auto& object:scene.objects) if(object.callback_address==0x08caf6 || object.callback_address==0x08ca45) {
+        const auto matches=[&](const auto& o){return o.command_offset==object.command_offset;};
+        const auto shape=std::find_if(shapes.begin(),shapes.end(),matches);
+        const auto stream=std::find_if(streaming.objects.begin(),streaming.objects.end(),matches);
+        if(shape==shapes.end() || stream==streaming.objects.end() || !shape->animated_planes)
+            throw std::runtime_error("Animated bridge has no collision shape");
+        const auto timing=rom.slice(object.command_offset+22,3);
+        bridges_.push_back({std::size_t(shape-shapes.begin()),std::size_t(stream-streaming.objects.begin()),
+                            {timing[0],timing[1],timing[2]},
+                            object.callback_address==0x08ca45?std::optional{timing[0]}:std::nullopt});
+        bridge_poses_.push_back({object.command_offset,object.template_word,object.position,object.orientation});
+    }
+}
+
+void CourseBridges::reset(std::span<CollisionShape> shapes) {
+    for(std::size_t i=0;i<bridges_.size();++i) {
+        auto& b=bridges_[i];
+        b.animation.reset();
+        shapes[b.shape].frame=b.fixed_pose.value_or(0);
+        bridge_poses_[i].frame=shapes[b.shape].frame;
+    }
+}
+
+void CourseBridges::advance(const CollisionStreamState& stream,std::span<CollisionShape> shapes) {
+    // CPU08:CB15 advances only on ordinary active calls. CAF6/CD55 performs
+    // initialization (also on reattachment) and leaves the last pose intact.
+    for(std::size_t i=0;i<bridges_.size();++i) {
+        auto& b=bridges_[i];
+        const auto& object=stream.objects[b.stream];
+        if(b.fixed_pose || !object.initialized || object.timer<2 || object.timer>=0x80)continue;
+        b.animation.advance();
+        shapes[b.shape].frame=b.animation.visible;
+        bridge_poses_[i].frame=b.animation.visible;
+    }
+}
+
 NativeRace::NativeRace(const Rom& rom, PlayerCar car, CourseId course,std::optional<Word> championship_carry,
                        std::optional<GridOrder> championship_grid)
     : NativeRace(rom,car,course,extract_course_scene(rom,course),championship_carry,championship_grid) {}
@@ -115,18 +152,7 @@ NativeRace::NativeRace(const Rom& rom, PlayerCar car, CourseId course, const Sce
             original_spatial_cell(signed_word(Word(cone.position.x)),signed_word(Word(cone.position.z))),0});
     std::sort(streaming_.objects.begin(),streaming_.objects.end(),
         [](const auto& a,const auto& b){return a.command_offset<b.command_offset;});
-    for(const auto& object:scene.objects) if(object.callback_address==0x08caf6 || object.callback_address==0x08ca45) {
-        const auto matches=[&](const auto& o){return o.command_offset==object.command_offset;};
-        const auto shape=std::find_if(shapes_.begin(),shapes_.end(),matches);
-        const auto stream=std::find_if(streaming_.objects.begin(),streaming_.objects.end(),matches);
-        if(shape==shapes_.end() || stream==streaming_.objects.end() || !shape->animated_planes)
-            throw std::runtime_error("Animated bridge has no collision shape");
-        const auto timing=rom.slice(object.command_offset+22,3);
-        bridges_.push_back({std::size_t(shape-shapes_.begin()),std::size_t(stream-streaming_.objects.begin()),
-                            {timing[0],timing[1],timing[2]},
-                            object.callback_address==0x08ca45?std::optional{timing[0]}:std::nullopt});
-        bridge_poses_.push_back({object.command_offset,object.template_word,object.position,object.orientation});
-    }
+    bridges_=CourseBridges(rom,scene,shapes_,streaming_);
     reset();
 }
 
@@ -135,12 +161,7 @@ void NativeRace::reset() {
     if(breakables_)breakables_->reset();
     if(cruise_bonus_)cruise_bonus_->reset();
     storm_phase_.reset();
-    for(std::size_t i=0;i<bridges_.size();++i) {
-        auto& b=bridges_[i];
-        b.animation.reset();
-        shapes_[b.shape].frame=b.fixed_pose.value_or(0);
-        bridge_poses_[i].frame=shapes_[b.shape].frame;
-    }
+    bridges_.reset(shapes_);
     rocks_.reset();
     movable_props_.reset();
     for(const auto& cone:movable_props_.poses()) {
@@ -177,6 +198,7 @@ void NativeRace::reset() {
     drive_={1,surface_options_,0,0};
     completion_={};
     failure_=RaceFailure::none;
+    last_award_.reset();
     clock_={0,clock_tuning_.initial_seconds,9999};
     frozen_=2; // Original initial3, after the first phase before actor creation.
     opponent_start_delay_={0,5,0}; // CPU08:B1BA/B1C7/B1D4, original slot order.
@@ -188,16 +210,7 @@ void NativeRace::reset() {
 void NativeRace::update_streaming() {
     const auto& player=cpu_positions_[player_index()];
     refresh_collision_stream(streaming_,stream_,player[0],player[2]);
-    // CPU08:CB15 advances only on ordinary active calls. CAF6/CD55 performs
-    // initialization (also on reattachment) and leaves the last pose intact.
-    for(std::size_t i=0;i<bridges_.size();++i) {
-        auto& b=bridges_[i];
-        const auto& object=stream_.objects[b.stream];
-        if(b.fixed_pose || !object.initialized || object.timer<2 || object.timer>=0x80)continue;
-        b.animation.advance();
-        shapes_[b.shape].frame=b.animation.visible;
-        bridge_poses_[i].frame=b.animation.visible;
-    }
+    bridges_.advance(stream_,shapes_);
     update_collision_stream(streaming_,stream_);
     movable_props_.cpu_step(streaming_,stream_);
     if(breakables_)breakables_->begin_phase();
@@ -248,25 +261,15 @@ void NativeRace::update_streaming() {
         if(course_==CourseId::white_land) {
             const bool contact=active && prop_player_contact_[i];
             if(callback==0x09a06a)breakables_->update_solid(props_[i],active,contact);
-            if(contact && !grip_gate_contact_[i]) {
-                auto& surface=racers_[player_index()].body.word(0x8a);
-                // 09:A4CF/A55E change traction only while 7F:3460 is zero.
-                // A574 starts the ramp; original phase1071 -> first weight1 at1118.
-                const bool clear_weather=!storm_phase_ || phase_-*storm_phase_<47;
-                if(callback==0x09a458 && clear_weather)surface&=0x00fd;
-                if(callback==0x09a4e7 && clear_weather)surface|=2;
-            }
-            if(callback==0x09a574 && contact && !storm_phase_ && completion_.acknowledged_laps==1) {
-                storm_phase_=phase_;
-                racers_[player_index()].body.word(0x8a)&=0x00fd;
-            }
+            if(contact)update_white_land_grip(racers_[player_index()].body,callback,!grip_gate_contact_[i],
+                                               completion_.acknowledged_laps,phase_,storm_phase_);
             grip_gate_contact_[i]=contact;
         }
         const bool collected=active && prop_player_contact_[i] && prop_collected_lap_[i]!=completion_.acknowledged_laps;
         if(collected && (callback==0x09ad5e || callback==0x09aebf || callback==0x09ac4f || callback==0x09acab)) {
             prop_collected_lap_[i]=completion_.acknowledged_laps;
             if(callback==0x09ac4f || callback==0x09acab) {
-                extend_race_clock(clock_,clock_tuning_.checkpoint_seconds);
+                award_time(clock_tuning_.checkpoint_seconds,true);
                 if(callback==0x09acab || ((course_==CourseId::lake_side || course_==CourseId::harbor_city) && callback==0x09ac4f))pickup_effects_.push_back(0x41); // 09:AD35.
             }
             else apply_race_pickup(racers_[player_index()].body,
@@ -312,14 +315,9 @@ void NativeRace::update_streaming() {
                         racers_[player_index()].body,completion_.acknowledged_laps,cells);
     }
     if(breakables_) {
-        // 09:8EAF gives the four 9048 impact fragments higher vertical speeds.
-        constexpr std::array<FragmentParameters,4> snow{{
-            {{40,-85,0},20},{{-40,-85,0},3},{{0,-90,40},10},{{0,-90,-40},1}
-        }};
-        for(const auto& p:rocks_.fragment_origins()) {
-            if(course_==CourseId::big_ravine)breakables_->spawn_rock_chips(rocks_.trigger_id(),p);
-            else breakables_->spawn(rocks_.trigger_id(),p,snow);
-        }
+        if(course_==CourseId::big_ravine) {
+            for(const auto& p:rocks_.fragment_origins())breakables_->spawn_rock_chips(rocks_.trigger_id(),p);
+        }else breakables_->spawn_snowball_fragments(rocks_);
         breakables_->submit_fragments();
         rocks_.append_debris(breakables_->meshes());
     }
@@ -450,10 +448,15 @@ void NativeRace::advance_countdown(std::uint8_t ticks) {
     if(expired) {++countdown_stage_;countdown_ticks_=50;}
 }
 
+void NativeRace::award_time(std::uint16_t seconds,bool checkpoint) {
+    extend_race_clock(clock_,seconds);
+    last_award_=TimeAward{phase_,seconds,checkpoint};
+}
+
 void NativeRace::acknowledge_lap() {
     const auto event=update_race_completion(completion_,racers_[player_index()].body.word(0x7a));
-    if(event==LapEvent::first_lap)extend_race_clock(clock_,clock_tuning_.lap_seconds[0]);
-    if(event==LapEvent::second_lap)extend_race_clock(clock_,clock_tuning_.lap_seconds[1]);
+    if(event==LapEvent::first_lap)award_time(clock_tuning_.lap_seconds[0],false);
+    if(event==LapEvent::second_lap)award_time(clock_tuning_.lap_seconds[1],false);
 }
 
 void NativeRace::step(std::uint16_t controls,std::uint8_t elapsed_clock_ticks,

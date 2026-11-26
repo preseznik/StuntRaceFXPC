@@ -20,7 +20,7 @@ class CourseScenery {
 public:
     CourseScenery(const Rom& rom, CourseId course, bool easy_ride_demo=false);
     void reset();
-    void step(const VehicleState& player,std::uint16_t acknowledged_laps=0);
+    void step(const VehicleState& player,std::uint16_t acknowledged_laps=0,std::span<const Vehicle> other_sky_drivers={});
     std::span<const SceneryPose> poses() const { return poses_; }
     // Each ROM tree contributes a screen-facing trunk and crown, phase zero.
     std::span<const ScenerySprite> sprites() const { return sprites_; }
@@ -60,7 +60,7 @@ private:
     struct SkyGate {
         SceneObject source;
         std::uint8_t timer{},last_lap=4;
-        bool contact{};
+        unsigned contacts{};
     };
     struct SkyFlight {
         std::size_t pose;
@@ -102,6 +102,6 @@ private:
                        std::uint16_t acknowledged_laps);
     void step_flyover(std::span<const ActivationCell>,const VehicleState&,std::uint16_t laps);
     void step_lake_actor(std::span<const ActivationCell>,const VehicleState&,std::uint16_t laps);
-    void step_sky_flights(std::span<const ActivationCell>,const VehicleState&,std::uint16_t laps);
+    void step_sky_flights(std::span<const ActivationCell>,const VehicleState&,std::uint16_t laps,std::span<const Vehicle> others);
 };
 }

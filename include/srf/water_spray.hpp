@@ -12,16 +12,16 @@ struct WaterParticle {
 
 class WaterSpray {
 public:
-    WaterSpray(const Rom& rom,const std::array<Vehicle,4>& cars,
+    WaterSpray(const Rom& rom,std::span<const Vehicle> cars,
                std::array<std::uint8_t,4> grid_seed={0xc8,0xa7,0x55,0x7f});
     void reset();
-    void step(const std::array<Vehicle,4>& cars);
+    void step(std::span<const Vehicle> cars);
     std::span<const ScenerySprite> sprites() const { return sprites_; }
     std::optional<WaterParticle> spawn(const VehicleState& body,const VehicleState& wheel,
                                        Vertex previous_center,std::uint8_t random) const;
 private:
-    std::array<std::array<std::uint8_t,4>,4> wheel_sizes_{};
-    std::array<std::array<Vertex,4>,4> centers_{};
+    std::vector<std::array<std::uint8_t,4>> wheel_sizes_;
+    std::vector<std::array<Vertex,4>> centers_;
     std::array<std::uint8_t,4> grid_seed_,random_{};
     std::uint16_t radius_{};
     std::uint8_t scale_{};

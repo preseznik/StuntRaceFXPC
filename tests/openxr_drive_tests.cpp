@@ -30,7 +30,7 @@ void refresh_settings(){
                       verify(d.Width==576 && d.Height==384,"75% eye size");++draws;
                   });
         verify(draws==8 && test_refresh_request()==expected,"Unsupported or available headset refresh handling");
-        D3D11_TEXTURE2D_DESC d{};test_hud_texture()->GetDesc(&d);verify(d.Width==960 && d.Height==148,"Scaled HUD");
+        verify(!test_hud_texture(),"Hidden HUD allocated a swapchain");
     }
     reset_test_runtime(false);
 }
@@ -42,7 +42,9 @@ void full_races(const srf::Rom& rom){
     for(int rate:{60,90,120,0}){
         race.reset();srf::vr::BonnetMotionClock clock;srf::RaceAudioState sound{};
         srf::NativeRace baseline(rom);
-        auto midpoint=grid;
+        auto midpoint=grid,previous=grid;
+        std::array<float,3> last_position{};
+        unsigned distinct_positions=0;
         verify(grid[0].body.words==race.racers()[0].body.words && race.phase()==0,"Restart grid");
         int64_t now=1000000000;size_t i=0;int frames=0;
         verify(!clock.advance(now,true,[]{throw std::runtime_error("Initial phase ran early");}),"Initial clock");
@@ -53,7 +55,8 @@ void full_races(const srf::Rom& rom){
             now+=rate?1000000000/rate:jitter[frames%4];++frames;
             half=clock.advance(now,true,[&]{
                 verify(i<tape.size(),"Extra native phase");
-                const auto before=race.racers()[race.player_index()].body;
+                previous=race.racers();
+                const auto& before=previous[race.player_index()].body;
                 srf::RaceAudioOutput events;
                 auto input=srf::prepare_player_input(sound,race.racers()[race.player_index()].body,tape[i].buttons,race.countdown_active(),events);
                 race.step(input,tape[i].ticks,std::nullopt,&midpoint);baseline.step(input,tape[i].ticks);++i;
@@ -65,7 +68,13 @@ void full_races(const srf::Rom& rom){
                 const auto mid=position(midpoint[race.player_index()].body);
                 extra_poses+=mid!=position(before) && mid!=position(race.racers()[race.player_index()].body);
             });
+            const float blend=(float(!half)+clock.blend())*.5f;
+            const auto poses=vehicle_poses(rom,previous,race.racers(),race.player_index(),blend,false,nullptr,{},false,std::nullopt,&midpoint);
+            const auto position=poses[race.player_index()].position;
+            distinct_positions+=position!=last_position;
+            last_position=position;
         }
+        verify(distinct_positions>unsigned(frames)*.85,"Bonnet motion repeated at the native callback rate");
         verify(race.completion().finished && race.completion().acknowledged_laps==3,"Complete Easy Ride");
         if(rate==60){reference=race.racers();finish_clock=race.remaining_seconds();}
         for(size_t j=0;j<4;++j){
@@ -76,7 +85,7 @@ void full_races(const srf::Rom& rom){
         verify(now-1000000000>=int64_t(tape.size())*1000000000/14 &&
                now-1000000000<int64_t(tape.size())*1000000000/14+17000000,"Unexpected race duration");
         std::cout<<"Replay "<<rate<<" Hz ("<<frames<<" presents), "<<race.phase()<<" phases, "<<finish_clock<<" seconds left, "
-                 <<extra_poses<<" distinct native midpoint positions\n";
+                 <<extra_poses<<" distinct native midpoints, "<<distinct_positions<<" distinct displayed positions\n";
         verify(extra_poses>1000,"Driving rarely produced a distinct native midpoint");
     }
     srf::vr::RaceClock clock;clock.advance(1000000000,true);clock.advance(1060000000,true);
@@ -113,14 +122,17 @@ int wmain(int argc,wchar_t** argv){
         };
         const auto first=capture(start),middle=capture(midpoint),complete=capture(race.racers());
         verify(middle!=first && middle!=complete,"The native midpoint did not reach the rendered bonnet camera");
-        int frame=0,draws=0;
+        srf::GridCountdownArt art(rom,race.course_id(),srf::PlayerCar::four_wd);
+        std::vector<std::uint32_t> pixels(208*128);
+        int frame=-2,draws=0;
         std::vector<BYTE> centered[2];
         drive.run([]{return true;},[&](int64_t,bool focused){
-            ++frame;verify(focused==(frame!=4 && frame!=5),"Focus or tracking handling");
-            auto hud=bonnet_instruments(race,false);hud.recenter=frame==2;return hud;
+            ++frame;verify(focused==(frame>0 && frame!=4 && frame!=5),"Focus or tracking handling");
+            draw_driving_hud(renderer,art,pixels,race,0,frame!=2);
+            return srf::vr::Display{renderer.headset_hud,frame==2};
         },[&](ID3D11Texture2D* t,DXGI_FORMAT format,const srf::vr::Eye& eye){
             const int side=draws++%2;
-            if(frame==1 || frame==3)verify(std::abs(eye.meters[0]-(side?.032f:-.032f))<.001f && std::abs(eye.orientation[1])<.001f,"Seat origin or IPD");
+            if(frame==1 || frame==3)verify(std::abs(eye.meters[0]-(side?.032f:-.032f))<.001f && std::abs(eye.meters[1])<.001f && std::abs(eye.orientation[1])<.001f,"Seat origin, height or IPD");
             if(frame==2)verify(eye.meters[0]>.08f && eye.orientation[1]<-.1f,"Tracked translation and handedness");
             auto target=renderer.make_target(768,512,t,format);
             renderer.render_eye(target,bonnet_eye(renderer,eye));auto pixels=renderer.readback_bgra(target);
@@ -131,13 +143,14 @@ int wmain(int argc,wchar_t** argv){
             else if(frame==3)verify(pixels==centered[side],"Recenter did not restore seat");
         });
         verify_test_runtime();verify(centered[0]!=centered[1],"Stereo eyes identical");
-        SceneTarget panel{960,148,test_hud_texture()};
-        auto hud=renderer.readback_bgra(panel);
-        for(int row:{0,74}){
-            unsigned count=0;for(int y=row;y<row+74;++y)for(int x=0;x<960;++x)count+=hud[(y*960+x)*4]>160;
-            verify(count>1000,"Missing HUD text");
+        SceneTarget panel{256,224,test_hud_texture()};
+        auto hud=renderer.readback_bgra(panel,true);
+        for(unsigned y=0;y<224;++y)for(unsigned x=0;x<256;++x){
+            const auto i=y*256+x,rgba=renderer.headset_hud[i];
+            verify(hud[i*4]==((rgba>>16)&255) && hud[i*4+1]==((rgba>>8)&255) &&
+                   hud[i*4+2]==(rgba&255) && hud[i*4+3]==(rgba>>24),"Compositor changed cartridge HUD pixels");
         }
-        if(!out.empty())Renderer::write_png(out/"hud.png",hud,960,148);
+        if(!out.empty())Renderer::write_png(out/"hud.png",hud,256,224);
         std::cout<<"Stereo, head motion, seated recenter, compositor HUD, tracking loss and shutdown passed\n";
         return 0;
     }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

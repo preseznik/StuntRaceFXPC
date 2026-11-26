@@ -127,7 +127,7 @@ CourseScenery::CourseScenery(const Rom& rom,CourseId course,bool easy_ride_demo)
 void CourseScenery::reset() {
     poses_.clear();
     sky_flights_.clear();
-    for(auto& gate:sky_gates_) {gate.timer=0;gate.last_lap=4;gate.contact=false;}
+    for(auto& gate:sky_gates_) {gate.timer=0;gate.last_lap=4;gate.contacts=0;}
     for (auto& fish:fish_) {
         fish.tail=fish.active_timer=0;
         poses_.push_back(fish.initial);
@@ -164,11 +164,11 @@ void CourseScenery::reset() {
     phase_=0;
 }
 
-void CourseScenery::step(const VehicleState& player,std::uint16_t acknowledged_laps) {
+void CourseScenery::step(const VehicleState& player,std::uint16_t acknowledged_laps,std::span<const Vehicle> other_sky_drivers) {
     // 08:CF92 consumes the preceding GSU phase's candidate. Reconstruct its
     // trigger-only AABB test without inserting a body into racing broadphase.
     const auto& previous=previous_player_ ? *previous_player_ : player;
-    const auto cells=activation_cells(activation_,
+    auto cells=activation_cells(activation_,
         static_cast<std::int16_t>(previous.word(0x1e)),
         static_cast<std::int16_t>(previous.word(0x22)));
     if (has_trigger_ && activate(cells,trigger_,trigger_timer_)) following_=contact(previous,trigger_,0x1680);
@@ -218,17 +218,31 @@ void CourseScenery::step(const VehicleState& player,std::uint16_t acknowledged_l
     if (flyover_trigger_) step_flyover(cells,player,acknowledged_laps);
     if(!interactive_trees_.empty())step_trees(cells,player);
     if(lake_actor_)step_lake_actor(cells,previous,acknowledged_laps);
-    if(!sky_gates_.empty())step_sky_flights(cells,player,acknowledged_laps);
+    if(!sky_gates_.empty()){
+        for(const auto& car:other_sky_drivers){
+            const auto area=activation_cells(activation_,signed_word(car.body.word(0x1e)),signed_word(car.body.word(0x22)));
+            cells.insert(cells.end(),area.begin(),area.end());
+        }
+        step_sky_flights(cells,player,acknowledged_laps,other_sky_drivers);
+    }
     previous_player_=player;
 }
 
 void CourseScenery::step_sky_flights(std::span<const ActivationCell> cells,const VehicleState& player,
-                                     std::uint16_t laps) {
+                                     std::uint16_t player_lap,std::span<const Vehicle> others) {
     for(auto& gate:sky_gates_) {
         const auto& origin=gate.source.position;
         const bool active=activate(cells,origin,gate.timer);
-        const bool crossed=active && gate.contact && gate.last_lap!=laps;
-        gate.contact=active && contact(player,origin,3840);
+        unsigned laps=(gate.contacts&1)?player_lap:4;
+        auto contacts=unsigned(active && contact(player,origin,3840));
+        for(unsigned i=0;i<others.size();++i){
+            const auto bit=2u<<i;
+            const auto& car=others[i].body;
+            if(gate.contacts&bit)laps=laps==4?car.word(0x7a):std::max<unsigned>(laps,car.word(0x7a));
+            if(active && contact(car,origin,3840))contacts|=bit;
+        }
+        gate.contacts=contacts;
+        const bool crossed=active && gate.last_lap!=laps && (others.empty() || gate.last_lap==4 || laps>gate.last_lap);
         if(!crossed || laps>=3)continue;
         gate.last_lap=static_cast<std::uint8_t>(laps);
         const auto spawn=[&](Vertex offset,Vertex target,unsigned yaw,int y_offset,int z_offset,

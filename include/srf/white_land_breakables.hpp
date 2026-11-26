@@ -3,6 +3,10 @@
 #include "srf/sunset_rocks.hpp"
 
 namespace srf {
+// ROM gates A458/A4E7 switch tire grip until the lap-two A574 weather ramp.
+void update_white_land_grip(VehicleState&,std::uint32_t callback,bool entering,std::uint16_t lap,
+                            std::uint64_t phase,std::optional<std::uint64_t>& storm_phase);
+
 struct FragmentParameters {
     RacePosition velocity;
     std::uint8_t size;
@@ -15,6 +19,8 @@ public:
     explicit WhiteLandBreakables(const Rom&);
     void reset();
     void begin_phase();
+    ScenerySprite intact_sprite(const NativeProp&) const;
+    void spawn_snowball_fragments(const SunsetRocks&);
     void update_solid(const NativeProp&,bool active,bool player_contact);
     void spawn(std::uint32_t command,const RacePosition&,const std::array<FragmentParameters,4>&);
     void spawn_rock_chips(std::uint32_t command,const RacePosition&);
@@ -22,7 +28,7 @@ public:
     std::span<const SceneryPose> meshes() const {return meshes_;}
     bool solid_retired(std::uint32_t command) const;
     void integrate(std::span<const CollisionShape>,std::span<const std::uint32_t> stream_order,
-                   std::span<const NativeProp>,const std::array<Vehicle,4>& cars,std::span<const VehicleState* const> rock_bodies={});
+                   std::span<const NativeProp>,std::span<const Vehicle> cars,std::span<const VehicleState* const> rock_bodies={});
     std::vector<std::uint32_t> overlapping(const VehicleState&) const;
     const VehicleState* body(std::uint32_t id) const;
     std::span<const ScenerySprite> sprites() const {return sprites_;}

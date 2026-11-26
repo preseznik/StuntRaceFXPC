@@ -60,14 +60,13 @@ void course_map_sound(const srf::Rom& rom,srf::CourseId course,std::unique_ptr<s
             }
         }catch(const std::exception& e){std::cerr<<"Course map audio: "<<e.what()<<'\n';audio.reset();}
 }
-bool show_course_map(const srf::Rom& rom,const srf::Championship& championship,const srf::ChampionshipProgress& progress,
-                     srf::CourseMapEntry entry,const std::filesystem::path& controller,int width,int height,bool borderless,
+bool show_course_map(GameHost& host,const srf::Rom& rom,const srf::Championship& championship,const srf::ChampionshipProgress& progress,
+                     srf::CourseMapEntry entry,const std::filesystem::path& controller,
                      std::unique_ptr<srf::AudioDevice>& audio) {
     CourseMapWindowState state;
-    ChampionshipWindow scope;
-    scope.open(L"StuntRaceFXCourseMap",L"Stunt Race FX — Course Map",course_map_window_proc,&state,width,height,borderless);
+    GameScreen scope(host,L"Stunt Race FX — Course Map",course_map_window_proc,&state);
     RECT rect{};
-    Renderer renderer(scope.window);
+    auto& renderer=*host.presenter;
     const srf::CourseMapArt art(rom,championship,progress);
     srf::CourseMap map(static_cast<unsigned>(championship.league()),progress.available(srf::SpeedClass::master),
                        entry,false,false,static_cast<unsigned>(championship.car()),championship.round());
@@ -83,14 +82,14 @@ bool show_course_map(const srf::Rom& rom,const srf::Championship& championship,c
     double remainder=0;
     constexpr double period=1./60.0988;
     bool audio_paused=false;
-    while(!state.quit) {
+    while(!game_closing && !state.quit) {
         MSG msg{};
         while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {
             if(msg.message==WM_QUIT){state.quit=true;break;}
             TranslateMessage(&msg);DispatchMessageW(&msg);
         }
         if(state.quit)break;
-        const bool focused=GetForegroundWindow()==scope.window && !IsIconic(scope.window);
+        const bool focused=game_focused(scope.window);
         const auto buttons=pad?pad->poll_course_map(focused):srf::CourseMapButtons{};
         const auto now=Clock::now();
         if(focused)remainder+=std::min(.16,std::chrono::duration<double>(now-last).count());
@@ -108,7 +107,7 @@ bool show_course_map(const srf::Rom& rom,const srf::Championship& championship,c
             play_audio(map.frame());
             if(map.finished())return true;
         }
-        if(IsIconic(scope.window)){Sleep(30);continue;}
+        if(!game_xr && IsIconic(scope.window)){Sleep(30);continue;}
         GetClientRect(scope.window,&rect);
         if(rect.right>0 && rect.bottom>0 && (controls.width!=unsigned(rect.right) || controls.height!=unsigned(rect.bottom))) {
             controls.width=rect.right;controls.height=rect.bottom;renderer.resize(controls.width,controls.height);
@@ -119,13 +118,12 @@ bool show_course_map(const srf::Rom& rom,const srf::Championship& championship,c
     return false;
 }
 
-std::optional<srf::SpeedClass> show_initial_course_map(const srf::Rom& rom,const srf::ChampionshipProgress& progress,
-                      srf::PlayerCar car,const std::filesystem::path& controller,int width,int height,bool borderless,
+std::optional<srf::SpeedClass> show_initial_course_map(GameHost& host,const srf::Rom& rom,const srf::ChampionshipProgress& progress,
+                      srf::PlayerCar car,const std::filesystem::path& controller,
                       std::unique_ptr<srf::AudioDevice>& audio,srf::SpeedClass initial=srf::SpeedClass::novice) {
     BootWindowInput input;
-    ChampionshipWindow scope;
-    scope.open(L"StuntRaceFXClassBoard",L"Stunt Race FX — Speed Trax",boot_window_proc,&input,width,height,borderless);
-    Renderer renderer(scope.window);
+    GameScreen scope(host,L"Stunt Race FX — Speed Trax",boot_window_proc,&input);
+    auto& renderer=*host.presenter;
     srf::ClassBoard board(progress.available(srf::SpeedClass::master),static_cast<unsigned>(initial));
     std::vector<std::uint32_t> pixels(256*224);
     std::array<std::optional<srf::CourseMapArt>,3> art;
@@ -136,16 +134,19 @@ std::optional<srf::SpeedClass> show_initial_course_map(const srf::Rom& rom,const
     using Clock=std::chrono::steady_clock;
     auto last=Clock::now();
     double remainder=0;
-    bool paused=false,play_caption=false;
-    while(!input.quit) {
+    bool paused=false,play_caption=false;unsigned previous_buttons=0xffff;
+    while(!game_closing && !input.quit) {
         MSG msg{};
         while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {
             if(msg.message==WM_QUIT){input.quit=true;break;}
             TranslateMessage(&msg);DispatchMessageW(&msg);
         }
-        if(input.quit)break;
-        const bool focused=GetForegroundWindow()==scope.window && !IsIconic(scope.window);
+        if(input.quit || (input.escape && !board.choosing_play()))break;
+        input.escape=false;
+        const bool focused=game_focused(scope.window);
         const auto buttons=input.held()|(pad?pad->poll_frontend(focused):0);
+        if((buttons&~previous_buttons&0x4000) && !board.choosing_play())break;
+        previous_buttons=buttons;
         const auto now=Clock::now();
         if(focused)remainder+=std::min(.16,std::chrono::duration<double>(now-last).count());
         last=now;
@@ -164,7 +165,7 @@ std::optional<srf::SpeedClass> show_initial_course_map(const srf::Rom& rom,const
             play_caption=board.choosing_play();
             SetWindowTextW(scope.window,play_caption?L"Stunt Race FX — Play":L"Stunt Race FX — Speed Trax");
         }
-        if(IsIconic(scope.window)){Sleep(30);continue;}
+        if(!game_xr && IsIconic(scope.window)){Sleep(30);continue;}
         RECT rect{};GetClientRect(scope.window,&rect);
         if(rect.right>0 && rect.bottom>0 && (controls.width!=unsigned(rect.right) || controls.height!=unsigned(rect.bottom))) {
             controls.width=rect.right;controls.height=rect.bottom;renderer.resize(controls.width,controls.height);

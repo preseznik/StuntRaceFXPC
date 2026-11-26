@@ -2,7 +2,7 @@
 // The chassis follows the body pose. Each tire follows its own suspension attachment.
 namespace n64 {
 using Vec = std::array<float,3>;
-struct Face { std::array<Vec,4> corners; Vec color; bool glass=false; };
+struct Face { std::array<Vec,4> corners; Vec color; SurfaceFinish finish=SurfaceFinish::none; };
 using Mesh = std::vector<Face>;
 constexpr unsigned f_type_player_shell=0xa200, f_type_rival_shell=0xa7e8;
 constexpr unsigned coupe_player_shell=0xa2a8, coupe_rival_shell=0xa804;
@@ -24,17 +24,17 @@ Mesh rally_body() {
     const auto belt=ring(85,-37,-146,148,17), deck=ring(79,-49,-135,140,14);
     const auto window=ring(75,-50,-112,70,10), roof=ring(62,-104,-90,37,10);
     const auto cap=ring(59,-110,-86,35,10);
-    auto band=[&](const auto& lower,const auto& upper,Vec color,bool glazing=false) {
+    auto band=[&](const auto& lower,const auto& upper,Vec color,SurfaceFinish finish) {
         for(unsigned i=0;i<8;++i) {
             const auto j=(i+1)%8;
-            mesh.push_back({{lower[i],lower[j],upper[j],upper[i]},color,glazing});
+            mesh.push_back({{lower[i],lower[j],upper[j],upper[i]},color,finish});
         }
     };
-    band(sill,bumper,trim); band(bumper,belt,ochre); band(belt,deck,gold);
-    band(deck,window,ochre); band(window,roof,glass,true); band(roof,cap,cream);
+    band(sill,bumper,trim,SurfaceFinish::none); band(bumper,belt,ochre,SurfaceFinish::paint); band(belt,deck,gold,SurfaceFinish::paint);
+    band(deck,window,ochre,SurfaceFinish::paint); band(window,roof,glass,SurfaceFinish::glass); band(roof,cap,cream,SurfaceFinish::paint);
     const Vec roof_center{0,-110,-23};
     for(unsigned i=0;i<8;++i)
-        mesh.push_back({{cap[i],cap[(i+1)%8],roof_center,roof_center},cream});
+        mesh.push_back({{cap[i],cap[(i+1)%8],roof_center,roof_center},cream,SurfaceFinish::paint});
     // Rear trim, split tail lamps and two inset side-window pillars.
     auto panel=[&](float left,float right,float top,float bottom,float z,Vec color) {
         mesh.push_back({{Vec{left,top,z},Vec{right,top,z},Vec{right,bottom,z},Vec{left,bottom,z}},color});
@@ -53,8 +53,8 @@ Mesh rally_body() {
     panel(-62,62,8,18,-152,{.28f,.30f,.29f});
     // Asymmetric paint stripes wrap over the hatch and across the roof.
     for(float x:{-32.f,-23.f}) {
-        mesh.push_back({{Vec{x,-38,-147},Vec{x+5,-38,-147},Vec{x+5,6,-151},Vec{x,6,-151}},cream});
-        mesh.push_back({{Vec{x,-110.5f,-80},Vec{x+5,-110.5f,-80},Vec{x+5,-110.5f,30},Vec{x,-110.5f,30}},ochre});
+        mesh.push_back({{Vec{x,-38,-147},Vec{x+5,-38,-147},Vec{x+5,6,-151},Vec{x,6,-151}},cream,SurfaceFinish::paint});
+        mesh.push_back({{Vec{x,-110.5f,-80},Vec{x+5,-110.5f,-80},Vec{x+5,-110.5f,30},Vec{x,-110.5f,30}},ochre,SurfaceFinish::paint});
     }
     return mesh;
 }
@@ -67,21 +67,21 @@ Mesh rally_wheel() {
         const auto angle=step*(6.2831853f/sectors);
         return {x,radius*std::cos(angle),radius*std::sin(angle)};
     };
-    auto strip=[&](float x0,float r0,float x1,float r1,Vec color) {
+    auto strip=[&](float x0,float r0,float x1,float r1,Vec color,SurfaceFinish finish=SurfaceFinish::none) {
         for(unsigned i=0;i<sectors;++i)
-            mesh.push_back({{point(x0,r0,i),point(x0,r0,i+1),point(x1,r1,i+1),point(x1,r1,i)},color});
+            mesh.push_back({{point(x0,r0,i),point(x0,r0,i+1),point(x1,r1,i+1),point(x1,r1,i)},color,finish});
     };
     const Vec rubber{.14f,.15f,.15f}, tread{.20f,.21f,.21f}, metal{.72f,.73f,.68f};
-    strip(-.36f,1,.36f,1,rubber);
+    strip(-.36f,1,.36f,1,rubber,SurfaceFinish::rubber);
     for(float side:{-1.f,1.f}) {
-        strip(side*.36f,1,side*.47f,.88f,rubber);
-        strip(side*.47f,.88f,side*.47f,.54f,rubber);
+        strip(side*.36f,1,side*.47f,.88f,rubber,SurfaceFinish::rubber);
+        strip(side*.47f,.88f,side*.47f,.54f,rubber,SurfaceFinish::rubber);
         strip(side*.47f,.54f,side*.49f,.46f,metal);
         strip(side*.46f,.47f,side*.46f,0,{.15f,.18f,.19f});
         strip(side*.51f,.17f,side*.51f,0,metal);
         for(unsigned i=0;i<sectors;++i) {
             mesh.push_back({{point(0,1.012f,i),point(0,1.012f,i+.35f),
-                             point(side*.33f,1.012f,i+.68f),point(side*.33f,1.012f,i+.33f)},tread});
+                             point(side*.33f,1.012f,i+.68f),point(side*.33f,1.012f,i+.33f)},tread,SurfaceFinish::rubber});
             if(i%4==0)
                 mesh.push_back({{point(side*.50f,.13f,i),point(side*.50f,.13f,i+2),
                                  point(side*.50f,.49f,i+1),point(side*.50f,.49f,i)},metal});
@@ -100,7 +100,7 @@ Mesh rally_fender(bool arch_enabled=true) {
         // Graphite extensions at the ends protect the painted crown.
         const Vec finish=(i<2 || i>7)?Vec{.23f,.24f,.23f}:Vec{.86f,.49f,.13f};
         mesh.push_back({{arch(-.59f,1.15f,i),arch(.59f,1.15f,i),
-                         arch(.59f,1.15f,i+1),arch(-.59f,1.15f,i+1)},finish});
+                         arch(.59f,1.15f,i+1),arch(-.59f,1.15f,i+1)},finish,(i>=2 && i<=7)?SurfaceFinish::paint:SurfaceFinish::none});
         for(float x:{-.59f,.59f})
             mesh.push_back({{arch(x,1.15f,i),arch(x,1.05f,i),
                              arch(x,1.05f,i+1),arch(x,1.15f,i+1)},{.20f,.22f,.22f}});
@@ -125,7 +125,7 @@ Mesh rally_fender(bool arch_enabled=true) {
 Mesh rally_hood() {
     Mesh mesh;
     auto panel=[&](float left,float right,float y,Vec color) {
-        mesh.push_back({{Vec{left,y,67},Vec{right,y,67},Vec{right,y+1,138},Vec{left,y+1,138}},color});
+        mesh.push_back({{Vec{left,y,67},Vec{right,y,67},Vec{right,y+1,138},Vec{left,y+1,138}},color,SurfaceFinish::paint});
     };
     panel(-67,67,-51,{.91f,.48f,.12f});
     for(float x:{-32.f,-23.f})panel(x,x+5,-51.3f,{.94f,.88f,.69f});
@@ -238,6 +238,7 @@ Mesh rally_cockpit(bool coupe=false) {
             p[2]=(p[2]-36.f)*(40.f/34.f);
         }
         quad({-52,-60,40},{52,-60,40},{32,-20,120},{-32,-20,120},{1.f,.66f,.04f});
+        mesh.back().finish=SurfaceFinish::paint;
     }
     return mesh;
 }
@@ -269,7 +270,8 @@ void draw_car(std::vector<GpuVertex>& triangles,const RenderVehicle& car,bool n6
                 }
                 quad[i]={p[0],p[1],p[2],face.color[0]*vertex_light,face.color[1]*vertex_light,
                          face.color[2]*(n64_lighting?.10f+.90f*vertex_light:1.f)};
-                if(face.glass) {quad[i].u=(i==1 || i==2);quad[i].v=(i>=2);quad[i].texture=-4;}
+                quad[i].finish=face.finish;
+                if(face.finish==SurfaceFinish::glass) {quad[i].u=(i==1 || i==2);quad[i].v=(i>=2);quad[i].texture=-4;}
             }
             for(int i:{0,1,2,0,2,3}) triangles.push_back(quad[i]);
         }
@@ -282,7 +284,7 @@ void draw_car(std::vector<GpuVertex>& triangles,const RenderVehicle& car,bool n6
         draw(car.descriptor==coupe_player_shell?coupe_cockpit:cockpit,car.position,1,car.orientation);
         return;
     }
-    const bool rally_player=car.player && !original_player_shell(car.descriptor);
+    const bool rally_player=car.remote_rally_truck || (car.player && !original_player_shell(car.descriptor));
     if(rally_player) {
         draw(body,car.position,1,car.orientation);
         if(!n64_lighting) {

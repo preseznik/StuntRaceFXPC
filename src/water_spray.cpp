@@ -20,16 +20,16 @@ bool WaterParticle::advance() {
     move(*this);
     return true;
 }
-WaterSpray::WaterSpray(const Rom& rom,const std::array<Vehicle,4>& cars,
+WaterSpray::WaterSpray(const Rom& rom,std::span<const Vehicle> cars,
                        std::array<std::uint8_t,4> grid_seed)
-    :grid_seed_(grid_seed),radius_(rom.u16(0x21ac+16)),scale_(rom.bytes()[0x21ac+7]) {
+    :wheel_sizes_(cars.size()),grid_seed_(grid_seed),radius_(rom.u16(0x21ac+16)),scale_(rom.bytes()[0x21ac+7]) {
     for(std::size_t i=0;i<cars.size();++i)
         for(std::size_t w=0;w<cars[i].wheels.size();++w)
             wheel_sizes_[i][w]=static_cast<std::uint8_t>(rom.u16(0x48000+cars[i].wheels[w].word(0x12)+4));
     reset();
 }
 void WaterSpray::reset() {
-    particles_.clear();sprites_.clear();centers_={};
+    particles_.clear();sprites_.clear();centers_.assign(wheel_sizes_.size(),{});
     // The original menu shares DP E6..E9 with other consumers. Start this
     // presentation-only stream at the observed grid seed for each course.
     random_=grid_seed_;
@@ -49,7 +49,8 @@ std::optional<WaterParticle> WaterSpray::spawn(const VehicleState& body,const Ve
     move(p); // Initial callback falls through to D549 and advances immediately.
     return p;
 }
-void WaterSpray::step(const std::array<Vehicle,4>& cars) {
+void WaterSpray::step(std::span<const Vehicle> cars) {
+    if(cars.size()!=wheel_sizes_.size())throw std::invalid_argument("Water spray vehicle count changed");
     std::erase_if(particles_,[](WaterParticle& particle){return !particle.advance();});
     for(std::size_t i=0;i<cars.size();++i) {
         const auto& car=cars[i];

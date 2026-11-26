@@ -1,3 +1,4 @@
+#include "srf/audio.hpp"
 #include "srf/boot_title.hpp"
 #include "srf/boot_menu.hpp"
 #include "srf/game_frontend.hpp"
@@ -158,6 +159,20 @@ int wmain(int argc,wchar_t** argv) {
         const std::filesystem::path out=argc==3?std::filesystem::path(argv[2]):
             std::filesystem::temp_directory_path()/("srf-stunt-flow-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()));
         require(std::filesystem::create_directory(out),"Choose a new directory for the test score file");
+        const auto lake=StuntCourse::blue_lake;
+        require(extract_stunt_audio(rom,lake).music.size()==3985,"Blue Lake course soundtrack");
+        for(const auto car:{PlayerCar::four_wd,PlayerCar::coupe,PlayerCar::f_type}) {
+            for(const auto attempt:{StuntAttempt::first,StuntAttempt::after_finish,StuntAttempt::after_timeout}) {
+                RockFieldSession session(rom,car,lake,attempt);
+                const auto trailer=session.drive.poses().front().position;
+                const auto eye=session.drive.trailer_camera();
+                require(eye[0]==trailer.x && std::abs(eye[2]-trailer.z)<600,"Blue Lake trailer camera");
+                require(session.rules.star_poses().size()==40 && session.rules.gate_poses().size()==3 &&
+                        session.rules.clock().remaining_seconds==(car==PlayerCar::four_wd?50u:60u),"Blue Lake start grid");
+                while(session.tick<600 && !session.drive.drive_started())session.advance(0);
+                require(session.drive.drive_started(),"Blue Lake trailer release");
+            }
+        }
         for(const auto course:{StuntCourse::up_n_down,StuntCourse::ice_dance}) {
             const std::string prefix=course==StuntCourse::ice_dance?"ice_dance":"up_down";
             const auto tape=menu_inputs(fixtures/(prefix+"_menu_inputs.csv"));

@@ -125,6 +125,16 @@ int wmain(int argc,wchar_t** argv) {
             SDL_HINT_JOYSTICK_WGI,SDL_HINT_JOYSTICK_GAMEINPUT,SDL_HINT_XINPUT_ENABLED})SDL_SetHint(hint,"0");
         require(SDL_InitSubSystem(SDL_INIT_GAMEPAD),"Initialize SDL gamepad");
         {
+            VirtualPad first,second;
+            srf::Gamepad p1({},0),p2({},1);
+            first.neutral();second.neutral();p1.poll(true);p2.poll(true);
+            second.axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,32767);
+            require(!p1.poll(true).requested && p2.poll(true).requested,"Second controller must drive only P2");
+            first.detach();
+            require(p1.poll(true).disconnected && !p1.poll(true).requested && p2.poll(true).requested,
+                    "Unplugging P1 must not transfer the P2 controller");
+        }
+        {
             srf::Gamepad input;require(input.poll(true).requested==0,"No controller input");
             VirtualPad pad;
             srf::BootTitle title;

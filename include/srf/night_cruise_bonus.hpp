@@ -12,8 +12,9 @@ public:
     void reset();
     void begin_phase();
     void touch(std::uint32_t command_offset);
-    void cpu_step(VehicleState& player,std::span<const ActivationCell> cells);
-    void record_contact(const VehicleState& player);
+    void cpu_step(VehicleState& player,std::span<const ActivationCell> cells,VehicleState* recipient=nullptr);
+    bool can_collect(const VehicleState& player) const;
+    void record_contact(const VehicleState& player) { item_contact_=can_collect(player); }
     const VehicleState* body() const { return item_active_ ? &pickup_ : nullptr; }
     static constexpr std::uint32_t pickup_id=0xfffb0000;
     std::span<const SceneryPose> poses() const { return poses_; }

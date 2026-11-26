@@ -9,6 +9,9 @@ internal static class CommandLine
     {
         try
         {
+            if (args[0] == "--test-lan-peer")
+                return await LanRegression.Run(Required(args, "--output"), Required(args, "--capture"), Required(args, "--role"),
+                    int.Parse(Required(args, "--port")), args.Contains("--force"), args.Contains("--drop-in"), Optional(args, "--course") ?? GameContent.DefaultCourse, Optional(args, "--discover-host"), Optional(args, "--discovered-address"));
             if (args[0] == "--test-child") return await TestChildAsync(args[1..]);
             if (args[0] == "--self-test") { await SelfTestAsync(Required(args, "--output")); return 0; }
             if (args[0] == "--configure-controller")
@@ -237,9 +240,10 @@ internal static class CommandLine
                     form.Shown += (_, _) => form.BeginInvoke(() =>
                     {
                         car.SelectedIndex = 2; course.SelectedIndex = course.Items.Count - 1;
-                        launchMode.SelectedItem = "4WD VR";
+                        var target = (ComboBox)form.Controls.Find("DisplayTarget", true).Single();
+                        target.SelectedItem = "VR";
                         ((ComboBox)form.Controls.Find("VrCourse", true).Single()).SelectedIndex = 1;
-                        launchMode.SelectedItem = "Quick Race";
+                        target.SelectedItem = "Desktop";
                         ((ComboBox)form.Controls.Find("DesktopFps", true).Single()).SelectedIndex = 2;
                         ((ComboBox)form.Controls.Find("VrRefresh", true).Single()).SelectedIndex = 4;
                         ((ComboBox)form.Controls.Find("VrScale", true).Single()).SelectedIndex = 2;
@@ -248,6 +252,15 @@ internal static class CommandLine
                         profile.SelectedItem = "N64 Mode";
                         resolution.SelectedIndex = 0;
                         profile.SelectedItem = "Remastered";
+                        ((CheckBox)form.Controls.Find("RayTracedShadows", true).Single()).Checked = true;
+                        ((TrackBar)form.Controls.Find("ShadowQuality", true).Single()).Value = 1;
+                        ((CheckBox)form.Controls.Find("HighDetailScenery", true).Single()).Checked = true;
+                        ((CheckBox)form.Controls.Find("VolumetricLighting", true).Single()).Checked = true;
+                        ((CheckBox)form.Controls.Find("WetTireSpray", true).Single()).Checked = true;
+                        ((CheckBox)form.Controls.Find("HighDetailRoad", true).Single()).Checked = true;
+                        ((CheckBox)form.Controls.Find("CarClearCoat", true).Single()).Checked = true;
+                        ((CheckBox)form.Controls.Find("RayTracedIndirect", true).Single()).Checked = true;
+                        ((CheckBox)form.Controls.Find("RayTracedReflections", true).Single()).Checked = true;
                         ((ComboBox)form.Controls.Find("RemasteredMsaa", true).Single()).SelectedIndex = 2;
                         ((ComboBox)form.Controls.Find("RemasteredWeather", true).Single()).SelectedItem = "Rain";
                         ((ComboBox)form.Controls.Find("RemasteredCamera", true).Single()).SelectedItem = "Isometric";
@@ -256,11 +269,14 @@ internal static class CommandLine
                         ((ComboBox)form.Controls.Find("TimeOfDay", true).Single()).SelectedIndex = 17;
                         resolution.SelectedIndex = 2;
                         ((ComboBox)form.Controls.Find("DesktopFps", true).Single()).SelectedIndex = 3;
+                        ((CheckBox)form.Controls.Find("HideRaceHud", true).Single()).Checked = true;
                         form.Close();
                     });
                     form.ShowDialog();
                 }
                 using var restored = new MainForm(settings);
+                if (!((CheckBox)restored.Controls.Find("HideRaceHud", true).Single()).Checked)
+                    throw new InvalidOperationException("Shared HUD visibility did not persist");
                 if (((ComboBox)restored.Controls.Find("DesktopFps", true).Single()).Text != "60 FPS" ||
                     ((ComboBox)restored.Controls.Find("VrRefresh", true).Single()).Text != "120 Hz" ||
                     ((ComboBox)restored.Controls.Find("VrScale", true).Single()).Text != "75%")
@@ -282,6 +298,25 @@ internal static class CommandLine
                     ((TrackBar)restored.Controls.Find("CameraDistance", true).Single()).Value != 115 ||
                     !((CheckBox)restored.Controls.Find("CameraLook", true).Single()).Checked)
                     throw new InvalidOperationException("Remastered camera settings did not persist");
+                if (!((CheckBox)restored.Controls.Find("VolumetricLighting", true).Single()).Checked)
+                    throw new InvalidOperationException("Volumetric lighting setting did not persist");
+                if (!((CheckBox)restored.Controls.Find("WetTireSpray", true).Single()).Checked)
+                    throw new InvalidOperationException("Wet tire spray setting did not persist");
+                if (!((CheckBox)restored.Controls.Find("HighDetailScenery", true).Single()).Checked)
+                    throw new InvalidOperationException("Roadside scenery setting did not persist");
+                if (!((CheckBox)restored.Controls.Find("HighDetailRoad", true).Single()).Checked)
+                    throw new InvalidOperationException("High-detail road setting did not persist");
+                if (!((CheckBox)restored.Controls.Find("CarClearCoat", true).Single()).Checked ||
+                    ((CheckBox)restored.Controls.Find("MaterialRoughness", true).Single()).Checked)
+                    throw new InvalidOperationException("Independent Remastered material settings did not persist");
+                if (!((CheckBox)restored.Controls.Find("RayTracedIndirect", true).Single()).Checked)
+                    throw new InvalidOperationException("Remastered indirect lighting did not persist");
+                if (!((CheckBox)restored.Controls.Find("RayTracedReflections", true).Single()).Checked)
+                    throw new InvalidOperationException("Remastered wet-road reflections did not persist");
+                if (!((CheckBox)restored.Controls.Find("RayTracedShadows", true).Single()).Checked)
+                    throw new InvalidOperationException("Remastered ray-traced shadows did not persist");
+                if (((TrackBar)restored.Controls.Find("ShadowQuality", true).Single()).Value != 1)
+                    throw new InvalidOperationException("Remastered shadow quality did not persist");
                 if (((ComboBox)restored.Controls.Find("RemasteredMsaa", true).Single()).Text != "4× MSAA" ||
                     ((ComboBox)restored.Controls.Find("RemasteredWeather", true).Single()).Text != "Rain")
                     throw new InvalidOperationException("Remastered weather or anti-aliasing did not persist");
@@ -307,17 +342,59 @@ internal static class CommandLine
                 carChoice.SelectedIndex = 0;
                 if (style.Text != "N64 Mode") throw new InvalidOperationException("Returning to 4WD lost its visual style");
                 freshMode.SelectedItem = "Normal";
-                if (((ComboBox)fresh.Controls.Find("Resolution", true).Single()).Text != "1920 x 1080")
+                if (style.Text != "Classic" || display.Text != "1920 x 1080")
                     throw new InvalidOperationException("A new profile inherited another mode's resolution");
+                style.SelectedItem = "Remastered";
+                if (display.Text != "3840 x 2160")
+                    throw new InvalidOperationException("Normal did not load the Remastered graphics profile");
                 fresh.Shown += (_, _) => fresh.BeginInvoke(fresh.Close);
                 fresh.ShowDialog();
                 using var migrated = new MainForm(partial);
                 var migratedMode = (ComboBox)migrated.Controls.Find("LaunchMode", true).Single();
-                if (migratedMode.Text != "Normal") throw new InvalidOperationException("Saving a style changed the launch mode");
+                if (migratedMode.Text != "Normal" ||
+                    ((ComboBox)migrated.Controls.Find("VisualStyle", true).Single()).Text != "Remastered")
+                    throw new InvalidOperationException("The preferred Normal style did not survive reopening");
                 migratedMode.SelectedItem = "Quick Race";
                 if (((ComboBox)migrated.Controls.Find("VisualStyle", true).Single()).Text != "N64 Mode" ||
                     ((ComboBox)migrated.Controls.Find("Resolution", true).Single()).Text != "1280 x 720")
                     throw new InvalidOperationException("The preferred Quick Race style and profile did not survive reopening");
+                foreach (var (quick, vr, normalVr, expectedMode) in new[] {
+                    (false, false, false, "Normal"), (true, false, false, "Quick Race"),
+                    (false, true, false, "Quick Race"), (false, true, true, "Normal") })
+                {
+                    File.WriteAllText(partial, JsonSerializer.Serialize(new LauncherSettings(
+                        QuickRace: quick, EasyRideVr: vr, NormalVr: normalVr, VrCourse: "aqua-tunnel",
+                        Car: "coupe", Course: "night-owl", NormalStyle: "N64", QuickRaceStyle: "Remastered",
+                        GraphicsProfiles: new() { ["4WD VR"] = new("1280 x 720"), ["Original"] = new("3840 x 2160") })));
+                    for (int pass = 0; pass < 2; ++pass)
+                    {
+                        using var savedForm = new MainForm(partial);
+                        ComboBox Box(string name) => (ComboBox)savedForm.Controls.Find(name, true).Single();
+                        var launchMode = Box("LaunchMode");
+                        var target = Box("DisplayTarget");
+                        if (!launchMode.Items.Cast<string>().SequenceEqual(new[] { "Normal", "Quick Race" }) ||
+                            launchMode.Text != expectedMode || target.Text != (vr ? "VR" : "Desktop") ||
+                            Box("VrCourse").Text != "Aqua Tunnel" || Box("Course").Text != "Night Owl" ||
+                            Box("PlayerCar").Text != "COUPE" || Box("VrCar").Text != (pass == 0 ? "4WD" : "F-TYPE"))
+                            throw new InvalidOperationException("Launch mode, display or course changed during migration");
+                        target.SelectedItem = "VR";
+                        if (Box("VisualStyle").Text != (pass == 0 ? "Classic" : "Remastered"))
+                            throw new InvalidOperationException("VR style did not survive reopening");
+                        Box("VisualStyle").SelectedItem = "Remastered";
+                        Box("VrCar").SelectedIndex = 2;
+                        if (Box("GraphicsProfile").Text != "VR" || Box("Resolution").Text != "1280 x 720")
+                            throw new InvalidOperationException("VR graphics profile lost during migration");
+                        target.SelectedItem = "Desktop";
+                        if (Box("VisualStyle").Text != (expectedMode == "Normal" ? "N64 Mode" : "Remastered"))
+                            throw new InvalidOperationException("Switching displays lost the desktop style");
+                        Box("GraphicsProfile").SelectedItem = "Classic";
+                        if (Box("Resolution").Text != "3840 x 2160")
+                            throw new InvalidOperationException("Classic graphics profile lost during migration");
+                        target.SelectedItem = vr ? "VR" : "Desktop";
+                        savedForm.Shown += (_, _) => savedForm.BeginInvoke(savedForm.Close);
+                        savedForm.ShowDialog();
+                    }
+                }
             }
             catch (Exception error) { uiError = error; }
         });
@@ -356,17 +433,35 @@ internal static class CommandLine
                     var style = (ComboBox)form.Controls.Find("VisualStyle", true).Single();
                     if (version >= 31 && (mode.Text != "Quick Race" || style.Text != "N64 Mode" || !launch.Enabled))
                         throw new InvalidOperationException($"N64 mode selection lost for content version {version}");
-                    mode.SelectedItem = "4WD VR";
+                    mode.SelectedItem = "Quick Race";
+                    var target = (ComboBox)form.Controls.Find("DisplayTarget", true).Single();
+                    target.SelectedItem = "VR";
                     if (launch.Text != "Launch VR" || launch.Enabled != (version >= 28))
                         throw new InvalidOperationException($"Wrong Easy Ride VR availability for content version {version}");
                     var vrCourses = (ComboBox)form.Controls.Find("VrCourse", true).Single();
-                    if (!vrCourses.Items.Cast<GameCourse>().Select(c => c.Id).SequenceEqual(new[]{"easy-ride", "aqua-tunnel"}))
-                        throw new InvalidOperationException("Wrong 4WD VR course list");
+                    if (!vrCourses.Items.Cast<GameCourse>().Select(c => c.Id).SequenceEqual(GameContent.Courses.Select(c => c.Id)))
+                        throw new InvalidOperationException("Wrong VR Quick Race course list");
                     vrCourses.SelectedIndex = 1;
                     if (launch.Enabled) throw new InvalidOperationException("Aqua Tunnel VR enabled without its world");
                     mode.SelectedItem = "Normal";
+                    if (launch.Enabled != (version >= GameContent.SeamlessVersion))
+                        throw new InvalidOperationException($"Wrong Normal VR availability for version {version}");
+                    target.SelectedItem = "Desktop";
                     if (launch.Text != "Launch Game" || launch.Enabled != (version >= 2))
                         throw new InvalidOperationException($"Wrong Normal availability for content version {version}");
+                    foreach (var look in new[] { "N64 Mode", "Remastered" })
+                    {
+                        style.SelectedItem = look;
+                        if (launch.Enabled != (version >= GameContent.ChampionshipStyleVersion))
+                            throw new InvalidOperationException($"Wrong Normal {look} availability for version {version}");
+                    }
+                    style.SelectedItem = "Classic";
+                    var classicRaster = (CheckBox)form.Controls.Find("ClassicSnes", true).Single();
+                    if (classicRaster.Checked || classicRaster.Enabled != (version >= GameContent.ClassicRasterVersion))
+                        throw new InvalidOperationException($"Wrong Classic SNES default or availability for version {version}");
+                    var hideHud = (CheckBox)form.Controls.Find("HideRaceHud", true).Single();
+                    if (hideHud.Checked || hideHud.Enabled != (version >= GameContent.RaceHudVersion))
+                        throw new InvalidOperationException($"Wrong race HUD default or availability for version {version}");
                     mode.SelectedItem = "Quick Race";
                     if (launch.Text != "Launch Quick Race" || !launch.Enabled)
                         throw new InvalidOperationException($"Wrong Quick Race availability for content version {version}");
@@ -400,6 +495,16 @@ internal static class CommandLine
                         if (launch.Text != "Launch Quick Race" || launch.Enabled != (version >= GameContent.N64ModeVersion))
                             throw new InvalidOperationException($"Wrong Easy Ride (N64 mode) availability for content version {version}");
                         var timeOfDay = (ComboBox)form.Controls.Find("TimeOfDay", true).Single();
+                        var roughness = (CheckBox)form.Controls.Find("MaterialRoughness", true).Single();
+                        var volumes = (CheckBox)form.Controls.Find("VolumetricLighting", true).Single();
+                        if (volumes.Enabled) throw new InvalidOperationException("N64 exposed volumetric lighting");
+                        var tireSpray = (CheckBox)form.Controls.Find("WetTireSpray", true).Single();
+                        var sceneryDetail = (CheckBox)form.Controls.Find("HighDetailScenery", true).Single();
+                        var roadDetail = (CheckBox)form.Controls.Find("HighDetailRoad", true).Single();
+                        var coat = (CheckBox)form.Controls.Find("CarClearCoat", true).Single();
+                        var indirect = (CheckBox)form.Controls.Find("RayTracedIndirect", true).Single();
+                        var reflections = (CheckBox)form.Controls.Find("RayTracedReflections", true).Single();
+                        var rayShadows = (CheckBox)form.Controls.Find("RayTracedShadows", true).Single();
                         var msaa = (ComboBox)form.Controls.Find("RemasteredMsaa", true).Single();
                         var weather = (ComboBox)form.Controls.Find("RemasteredWeather", true).Single();
                         var camera = (ComboBox)form.Controls.Find("RemasteredCamera", true).Single();
@@ -407,6 +512,10 @@ internal static class CommandLine
                         var distance = (TrackBar)form.Controls.Find("CameraDistance", true).Single();
                         if (distance.Enabled) throw new InvalidOperationException("N64 exposed the camera distance limit");
                         if (camera.Enabled || cameraLook.Enabled) throw new InvalidOperationException("N64 exposed Remastered camera settings");
+                        if (roughness.Enabled || coat.Enabled || roadDetail.Enabled || sceneryDetail.Enabled || tireSpray.Enabled) throw new InvalidOperationException("N64 exposed material settings");
+                        if (indirect.Enabled) throw new InvalidOperationException("N64 exposed indirect lighting");
+                        if (reflections.Enabled) throw new InvalidOperationException("N64 exposed wet-road reflections");
+                        if (rayShadows.Enabled) throw new InvalidOperationException("N64 exposed ray-traced shadows");
                         if (msaa.Enabled || weather.Enabled) throw new InvalidOperationException("N64 exposed Remastered weather or MSAA");
                         if (timeOfDay.Enabled) throw new InvalidOperationException("N64 exposed Remastered lighting");
                         style.SelectedItem = "Remastered";
@@ -414,6 +523,22 @@ internal static class CommandLine
                             throw new InvalidOperationException($"Wrong Remastered camera defaults or availability for version {version}");
                         if (distance.Value != GameContent.DefaultCameraDistance || distance.Enabled != (version >= GameContent.IsometricVersion))
                             throw new InvalidOperationException($"Wrong camera distance defaults or availability for version {version}");
+                        if (volumes.Checked || volumes.Enabled != (version >= GameContent.VolumetricLightingVersion))
+                            throw new InvalidOperationException($"Wrong volumetric lighting default or availability for version {version}");
+                        if (tireSpray.Checked || tireSpray.Enabled != (version >= GameContent.WetTireSprayVersion))
+                            throw new InvalidOperationException($"Wrong wet tire spray default or availability for version {version}");
+                        if (sceneryDetail.Checked || sceneryDetail.Enabled != (version >= GameContent.ForestSceneryVersion))
+                            throw new InvalidOperationException($"Wrong roadside scenery default or availability for version {version}");
+                        if (roadDetail.Checked || roadDetail.Enabled != (version >= GameContent.RoadDetailVersion))
+                            throw new InvalidOperationException($"Wrong road detail default or availability for version {version}");
+                        if (roughness.Checked || coat.Checked || roughness.Enabled != (version >= GameContent.MaterialFinishVersion) || coat.Enabled != roughness.Enabled)
+                            throw new InvalidOperationException($"Wrong material settings for version {version}");
+                        if (indirect.Checked || indirect.Enabled != (version >= GameContent.IndirectLightVersion))
+                            throw new InvalidOperationException($"Wrong indirect lighting default or availability for version {version}");
+                        if (reflections.Checked || reflections.Enabled != (version >= GameContent.RayReflectionsVersion))
+                            throw new InvalidOperationException($"Wrong reflection defaults or availability for version {version}");
+                        if (rayShadows.Checked || rayShadows.Enabled != (version >= GameContent.RayShadowsVersion))
+                            throw new InvalidOperationException($"Wrong ray-traced shadow defaults or availability for version {version}");
                         if (msaa.Text != "Off" || weather.Text != "Clear" || msaa.Enabled != (version >= GameContent.AtmosphereVersion) || weather.Enabled != msaa.Enabled)
                             throw new InvalidOperationException($"Wrong Remastered graphics defaults or availability for version {version}");
                         if (timeOfDay.Text != "12:00" || timeOfDay.Enabled != (version >= GameContent.SunLightingVersion))
@@ -432,26 +557,44 @@ internal static class CommandLine
                             throw new InvalidOperationException("Switching modes lost the Quick Race selection");
                         var aquaAssets = Directory.CreateDirectory(GameContent.AssetDirectory(stage, "aqua-tunnel"));
                         File.WriteAllText(Path.Combine(aquaAssets.FullName, "world.srfworld"), "fixture");
-                        foreach (var look in new[] { "Original", "N64 Mode", "Remastered" })
+                        foreach (var look in new[] { "Classic", "N64 Mode", "Remastered" })
                         {
                             style.SelectedItem = look;
-                            if (launch.Enabled != (look == "Original" || version >= GameContent.AquaStyleVersion))
+                            if (launch.Enabled != (look == "Classic" || version >= GameContent.AquaStyleVersion))
                                 throw new InvalidOperationException($"Wrong Aqua Tunnel {look} availability for version {version}");
                         }
-                        mode.SelectedItem = "4WD VR";
+                        target.SelectedItem = "VR";
                         if (launch.Enabled != (version >= 30) || vrCourses.SelectedIndex != 1)
                             throw new InvalidOperationException($"Wrong Aqua Tunnel VR availability for content version {version}");
-                        mode.SelectedItem = "Quick Race";
+                        target.SelectedItem = "Desktop";
                         foreach (var entry in GameContent.Courses.Skip(2))
                         {
                             var assets = GameContent.AssetDirectory(stage, entry.Id);
                             Directory.CreateDirectory(assets);
                             File.WriteAllText(Path.Combine(assets, "world.srfworld"), "fixture");
+                            // Check the whole VR list once every course fixture exists.
+                            if (entry == GameContent.Courses[^1])
+                            {
+                                target.SelectedItem = "VR";
+                                var vrCar = (ComboBox)form.Controls.Find("VrCar", true).Single();
+                                foreach (var vrCourse in vrCourses.Items.Cast<GameCourse>())
+                                {
+                                    vrCourses.SelectedItem = vrCourse;
+                                    for (int i = 0; i < 3; ++i)
+                                    {
+                                        vrCar.SelectedIndex = i;
+                                        var required = Math.Max(vrCourse.VrVersion, i == 0 ? 0 : GameContent.AllCarsVrVersion);
+                                        if (launch.Enabled != (version >= required))
+                                            throw new InvalidOperationException($"Wrong VR availability for {vrCar.Text} on {vrCourse.Name}");
+                                    }
+                                }
+                                target.SelectedItem = "Desktop";
+                            }
                             courses.SelectedItem = entry;
-                            foreach (var look in new[] { "Remastered", "N64 Mode", "Original" })
+                            foreach (var look in new[] { "Remastered", "N64 Mode", "Classic" })
                             {
                                 style.SelectedItem = look;
-                                var minimum = look == "Original" ? entry.MinimumContentVersion : entry.Id switch
+                                var minimum = look == "Classic" ? entry.MinimumContentVersion : entry.Id switch
                                 {
                                     "harbor-city" => GameContent.HarborCityStyleVersion,
                                     "sky-ramp" => GameContent.SkyRampStyleVersion,

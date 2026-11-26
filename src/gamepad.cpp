@@ -83,7 +83,8 @@ struct Gamepad::Impl {
     std::array<bool,4> map_released{};
     std::uint16_t frontend_released{};
     std::string name,error;
-    explicit Impl(const std::filesystem::path& config):bindings(read_bindings(config)) {
+    const std::optional<unsigned> player;
+    Impl(const std::filesystem::path& config,std::optional<unsigned> index):bindings(read_bindings(config)),player(index) {
         // The game owns a Win32 window, not an SDL window. Poll SDL ourselves
         // and gate every result using the actual Win32 foreground state.
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
@@ -104,9 +105,17 @@ struct Gamepad::Impl {
         if(!pad) {
             int count=0;auto* ids=SDL_GetGamepads(&count);
             if(!ids)error=SDL_GetError();
-            for(int i=0;i<count && !pad;++i) {
+            for(int i=0;ids && i<count && !pad;++i){
+                if(player && SDL_GetGamepadPlayerIndexForID(ids[i])!=int(*player))continue;
                 pad=SDL_OpenGamepad(ids[i]);
                 if(!pad)error=SDL_GetError();
+            }
+            if(player && !pad){
+                for(int i=0;ids && i<count && !pad;++i){
+                    if(SDL_GetGamepadPlayerIndexForID(ids[i])>=0)continue;
+                    pad=SDL_OpenGamepad(ids[i]);
+                    if(pad && !SDL_SetGamepadPlayerIndex(pad,int(*player))){SDL_CloseGamepad(pad);pad=nullptr;}
+                }
             }
             SDL_free(ids);
             if(pad) {const auto* text=SDL_GetGamepadName(pad);name=text?text:"Gamepad";error.clear();armed=false;}
@@ -157,7 +166,7 @@ struct Gamepad::Impl {
         return result;
     }
 };
-Gamepad::Gamepad(const std::filesystem::path& config):impl_(std::make_unique<Impl>(config)) {}
+Gamepad::Gamepad(const std::filesystem::path& config,std::optional<unsigned> player):impl_(std::make_unique<Impl>(config,player)) {}
 Gamepad::~Gamepad()=default;
 GamepadInput Gamepad::poll(bool focused,bool camera_look) {return impl_->poll(focused,camera_look);}
 std::uint16_t Gamepad::poll_frontend(bool focused) {

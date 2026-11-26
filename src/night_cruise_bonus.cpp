@@ -46,7 +46,7 @@ void NightCruiseBonus::touch(std::uint32_t id) {
         return;
     }
 }
-void NightCruiseBonus::cpu_step(VehicleState& player,std::span<const ActivationCell> cells) {
+void NightCruiseBonus::cpu_step(VehicleState& player,std::span<const ActivationCell> cells,VehicleState* recipient) {
     const auto index=initial_.size();
     if(spawn_) {
         spawn_=false;started_=true;
@@ -90,9 +90,10 @@ void NightCruiseBonus::cpu_step(VehicleState& player,std::span<const ActivationC
     }
     if(!dropped_)return;
     auto& item=poses_[index+1];
+    auto& collector=recipient?*recipient:player;
     if(rise_steps_) {
         if(--rise_steps_) {
-            item.position={word(player.word(0x1e)),word(player.word(0x20)-192-40*(10-rise_steps_)),word(player.word(0x22))};
+            item.position={word(collector.word(0x1e)),word(collector.word(0x20)-192-40*(10-rise_steps_)),word(collector.word(0x22))};
             item.yaw=item.pitch=static_cast<std::uint8_t>(16*(10-rise_steps_));
         } else item.visible=false;
         return;
@@ -102,20 +103,21 @@ void NightCruiseBonus::cpu_step(VehicleState& player,std::span<const ActivationC
     if(!item_active_)return;
     item.yaw+=16;item.pitch+=16;
     if(!item_contact_)return;
-    apply_race_pickup(player,RacePickup::boost);
+    apply_race_pickup(collector,RacePickup::boost);
     effects_.push_back(0x25);
     item_active_=false;pickup_={};
     // AE60 runs once in the same object pass that allocates the reward child.
     rise_steps_=9;
-    item.position={word(player.word(0x1e)),word(player.word(0x20)-232),word(player.word(0x22))};
+    item.position={word(collector.word(0x1e)),word(collector.word(0x20)-232),word(collector.word(0x22))};
     item.yaw=item.pitch=16;
 }
-void NightCruiseBonus::record_contact(const VehicleState& player) {
-    item_contact_=item_active_ && !(player.word(0x16)&pickup_.word(0x1a)) &&
+bool NightCruiseBonus::can_collect(const VehicleState& player) const {
+    bool contact=item_active_ && !(player.word(0x16)&pickup_.word(0x1a)) &&
         (player.word(0x16)&2) && (player.word(0x64)&1);
-    for(unsigned i=0;i<3 && item_contact_;++i) {
+    for(unsigned i=0;i<3 && contact;++i) {
         const int distance=word(player.word(0x1e + 2*i)-pickup_.word(0x1e + 2*i));
-        item_contact_=std::abs(distance)<160+player.word(0x0c+2*i);
+        contact=std::abs(distance)<160+player.word(0x0c+2*i);
     }
+    return contact;
 }
 }

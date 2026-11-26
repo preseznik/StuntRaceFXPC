@@ -41,7 +41,8 @@ inline void check_boot_menu(const srf::Rom& rom) {
     check(menu.event()==BootMenuEvent::board && menu.car()==PlayerCar::f_type && menu.initials()=="CAZ","Class board handoff values");
     menu.resume_car();press(0x4000);for(int i=0;i<22;++i)menu.advance(0);
     press(0x0800);check(menu.frame().mode==3,"Original game selection upward wrap");
-    press(0x8000);check(menu.event()==BootMenuEvent::unavailable,"Unavailable mode remains selected");
+    press(0x8000);for(unsigned i=0;i<30;++i)menu.advance(0);
+    check(menu.frame().mode==3 && menu.event()==BootMenuEvent::board,"Test Run opens the practice course");
     // Original nonblack model pixels in the isolated 104x88 car window at these
     // independent turntable angles. Native polygons use their own rasterization.
     struct Body {PlayerCar car;unsigned phase,count;};
@@ -97,8 +98,11 @@ inline void check_stunt_menu(const srf::Rom& rom) {
     verify(art,{{40,72,64,48},{152,72,64,48},{40,152,64,48},{152,152,64,48}},0xd74b1b04);
     press(0x0800);check(board.course==2,"Up selects Ice Dance");
     press(0x0100);check(board.course==3,"Right selects Blue Lake");
-    press(0x1000);for(int i=0;i<17;++i)board.advance(0);press(0x1000);
-    check(board.unavailable && !board.ready_to_drive(),"Blue Lake cannot start a different course");
+    press(0x1000);while(!board.panel_visible())board.advance(0);
+    auto blue=board;
+    blue.advance(0x1000);
+    for(int i=0;i<188;++i)blue.advance(0);
+    check(blue.ready_to_drive() && playable_stunt_courses.at(blue.course)==StuntCourse::blue_lake,"Play Blue Lake");
     press(0x4000);press(0x0400);check(board.course==1,"Down selects Up'n Down");
     press(0x1000);while(!board.panel_visible())board.advance(0);
     verify(recorded,{{46,72,166,130}},0x692925a4);

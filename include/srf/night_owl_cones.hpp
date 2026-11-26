@@ -9,7 +9,7 @@ public:
     void reset();
     void cpu_step(StreamingCourse&,const CollisionStreamState&);
     void integrate(std::span<const CollisionShape>,std::span<const std::uint32_t> active_order,
-                   const std::array<Vehicle,4>&);
+                   std::span<const Vehicle>);
     const VehicleState* body(std::uint32_t command) const;
     std::span<const SceneryPose> poses() const {return poses_;}
     std::span<const std::uint8_t> effects() const {return effects_;}

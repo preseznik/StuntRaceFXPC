@@ -72,8 +72,14 @@ void SkyRampAircraft::step(std::span<const ActivationCell> cells) {
     }
     std::erase_if(smoke_,[](const Smoke& s){return !s.life;});
 }
-void SkyRampAircraft::record_contact(const VehicleState& player) {
-    contact_=attached_ && (player.word(0x16)&2) && (player.word(0x64)&1) &&
+void SkyRampAircraft::record_contact(const VehicleState& first,const VehicleState* other) {
+    contact_=attached_ && (touches(first) || (other && touches(*other)));
+}
+void SkyRampAircraft::record_contacts(std::span<const Vehicle> drivers) {
+    contact_=attached_ && std::ranges::any_of(drivers,[&](const Vehicle& car){return touches(car.body);});
+}
+bool SkyRampAircraft::touches(const VehicleState& player) const {
+    return (player.word(0x16)&2) && (player.word(0x64)&1) &&
         !(player.word(0x16)&body_.word(0x1a)) && collision_bounds_overlap(
         {signed_word(player.word(0x1e)),signed_word(player.word(0x20)),signed_word(player.word(0x22))},
         {player.word(0x0c),player.word(0x0e),player.word(0x10)},

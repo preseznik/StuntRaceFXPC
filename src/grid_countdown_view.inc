@@ -30,6 +30,7 @@ std::uint8_t grid_camera(const Renderer& renderer,const std::array<float,3>& ori
     controls.yaw=yaw+chase_weight*std::remainder(controls.yaw-yaw,65536*radians);
     controls.pitch=std::lerp(std::lerp(a.pitch,b->pitch,t)*radians,controls.pitch,chase_weight);
     controls.distance*=chase_weight;
+    controls.zoom=std::lerp(2.f,controls.zoom,chase_weight);
     controls.target_x=std::lerp(eye[0],controls.target_x,chase_weight);
     controls.target_y=std::lerp(eye[1],controls.target_y,chase_weight);
     controls.target_z=std::lerp(eye[2],controls.target_z,chase_weight);

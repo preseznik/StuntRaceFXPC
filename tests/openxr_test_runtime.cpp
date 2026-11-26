@@ -19,7 +19,7 @@ struct Chain {ComPtr<ID3D11Texture2D> color;int state{},released{};};
 std::array<Chain,3> chains;
 struct Space {XrPosef origin;};
 ComPtr<ID3D11Device> gpu;
-int chain_count{},events{},frame{},submissions{},recenter_count{};
+int chain_count{},events{},frame{-2},submissions{},recenter_count{};
 bool waited{},begun{},session_running{};
 bool advertises_refresh{},refresh_enabled{};
 float requested_rate{};
@@ -34,7 +34,11 @@ XrPosef physical_head(){
 }
 XrResult XRAPI_CALL requirements(XrInstance,XrSystemId,XrGraphicsRequirementsD3D11KHR* out){
     ComPtr<IDXGIFactory1> factory;ComPtr<IDXGIAdapter1> adapter;DXGI_ADAPTER_DESC1 desc{};
-    ensure(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && SUCCEEDED(factory->EnumAdapters1(0,&adapter)) && SUCCEEDED(adapter->GetDesc1(&desc)));
+    ensure(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))));
+    for(UINT i=0;;++i){
+        ensure(SUCCEEDED(factory->EnumAdapters1(i,adapter.ReleaseAndGetAddressOf())) && SUCCEEDED(adapter->GetDesc1(&desc)));
+        if(!GetEnvironmentVariableW(L"SRF_TEST_WARP",nullptr,0) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))break;
+    }
     out->adapterLuid=desc.AdapterLuid;out->minFeatureLevel=D3D_FEATURE_LEVEL_11_0;return XR_SUCCESS;
 }
 XrResult XRAPI_CALL refresh_choices(XrSession,uint32_t n,uint32_t* c,float* out){
@@ -97,9 +101,10 @@ XRAPI_ATTR XrResult XRAPI_CALL xrReleaseSwapchainImage(XrSwapchain s,const XrSwa
 XRAPI_ATTR XrResult XRAPI_CALL xrPollEvent(XrInstance,XrEventDataBuffer* b){
     XrSessionState state;
     if(events==0)state=XR_SESSION_STATE_READY;
-    else if(events==1)state=XR_SESSION_STATE_FOCUSED;
-    else if(frame==6 && events==2)state=XR_SESSION_STATE_STOPPING;
-    else if(frame==6 && events==3)state=XR_SESSION_STATE_EXITING;
+    else if(events==1)state=XR_SESSION_STATE_VISIBLE;
+    else if(events==2 && frame>=-1)state=XR_SESSION_STATE_FOCUSED;
+    else if(frame==6 && events==3)state=XR_SESSION_STATE_STOPPING;
+    else if(frame==6 && events==4)state=XR_SESSION_STATE_EXITING;
     else return XR_EVENT_UNAVAILABLE;
     auto* event=reinterpret_cast<XrEventDataSessionStateChanged*>(b);event->type=XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED;event->state=state;++events;return XR_SUCCESS;
 }
@@ -111,7 +116,10 @@ XRAPI_ATTR XrResult XRAPI_CALL xrWaitFrame(XrSession,const XrFrameWaitInfo*,XrFr
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrBeginFrame(XrSession,const XrFrameBeginInfo*){ensure(waited && !begun);waited=false;begun=true;return XR_SUCCESS;}
 XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace,XrSpace,XrTime time,XrSpaceLocation* l){
-    ensure(time==display_time());l->locationFlags=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;l->pose=physical_head();return XR_SUCCESS;
+    ensure(time==display_time());l->locationFlags=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;l->pose=physical_head();
+    if(frame!=0)l->locationFlags|=XR_SPACE_LOCATION_POSITION_TRACKED_BIT|XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+    if(frame<=0)l->pose.position.y=.3f; // plausible provisional height before focus or tracking
+    return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrLocateViews(XrSession,const XrViewLocateInfo* info,XrViewState* state,uint32_t n,uint32_t* count,XrView* views){
     ensure(info->displayTime==display_time() && n==2);*count=2;
@@ -121,21 +129,27 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateViews(XrSession,const XrViewLocateInfo* i
     const float yaw=2*(std::atan2(head.orientation.y,head.orientation.w)-std::atan2(origin.orientation.y,origin.orientation.w));
     for(int i=0;i<2;++i){
         const float side=i?.032f:-.032f;
-        views[i].pose={{0,std::sin(yaw/2),0,std::cos(yaw/2)},{head.position.x-origin.position.x+side*std::cos(yaw),0,-side*std::sin(yaw)}};
+        views[i].pose={{0,std::sin(yaw/2),0,std::cos(yaw/2)},{head.position.x-origin.position.x+side*std::cos(yaw),head.position.y-origin.position.y,-side*std::sin(yaw)}};
         views[i].fov={-.76f,.76f,.70f,-.65f};
     }return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession,const XrFrameEndInfo* end){
     ensure(begun && end->displayTime==display_time());begun=false;
-    if(frame==4 || frame==5){ensure(end->layerCount==0);return XR_SUCCESS;}
-    ensure(end->layerCount==2);++submissions;
+    if(frame<=0 || frame==4 || frame==5){ensure(end->layerCount==0);return XR_SUCCESS;}
+    const bool hud=chain_count==3 && frame!=2;
+    ensure(end->layerCount==(hud?2u:1u));++submissions;
     auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(end->layers[0]);
-    auto* h=reinterpret_cast<const XrCompositionLayerQuad*>(end->layers[1]);
-    ensure(p->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION && p->viewCount==2 && h->type==XR_TYPE_COMPOSITION_LAYER_QUAD && h->space==p->space);
-    ensure(h->pose.position.y<0 && h->pose.position.z<-1 && h->eyeVisibility==XR_EYE_VISIBILITY_BOTH);
-    ensure(p->views[0].pose.position.x<p->views[1].pose.position.x && h->subImage.swapchain==reinterpret_cast<XrSwapchain>(&chains[2]));
+    ensure(p->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION && p->viewCount==2);
+    ensure(p->views[0].pose.position.x<p->views[1].pose.position.x);
+    if(hud){
+        auto* h=reinterpret_cast<const XrCompositionLayerQuad*>(end->layers[1]);
+        ensure(h->type==XR_TYPE_COMPOSITION_LAYER_QUAD && h->space==p->space);
+        ensure(h->pose.position.y<0 && h->pose.position.z<-1 && h->eyeVisibility==XR_EYE_VISIBILITY_BOTH);
+        ensure(h->layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT);
+        ensure(h->subImage.swapchain==reinterpret_cast<XrSwapchain>(&chains[2]) && chains[2].released>0);
+    }
     for(int i=0;i<2;++i)ensure(p->views[i].subImage.swapchain==reinterpret_cast<XrSwapchain>(&chains[i]) && chains[i].released==submissions);
-    ensure(chains[2].released>0);return XR_SUCCESS;
+    return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrDestroySwapchain(XrSwapchain s){auto c=reinterpret_cast<Chain*>(s);ensure(!c->state);c->color.Reset();return XR_SUCCESS;}
 XRAPI_ATTR XrResult XRAPI_CALL xrDestroySession(XrSession){gpu.Reset();return XR_SUCCESS;}
@@ -144,7 +158,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrDestroyInstance(XrInstance){return XR_SUCCESS;}
 void verify_test_runtime(){ensure(!session_running && submissions==4 && recenter_count==2 && !waited && !begun);}
 ID3D11Texture2D* test_hud_texture(){return chains[2].color.Get();}
 void reset_test_runtime(bool refresh){
-    ensure(!session_running && !gpu);chains={};chain_count=events=frame=submissions=recenter_count=0;
+    ensure(!session_running && !gpu);chains={};chain_count=events=submissions=recenter_count=0;frame=-2;
     waited=begun=refresh_enabled=false;requested_rate=0;advertises_refresh=refresh;
 }
 float test_refresh_request(){return requested_rate;}

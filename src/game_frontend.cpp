@@ -446,7 +446,7 @@ bool show_game_result(const GameResultPage& page) {
 }
 
 bool show_round_result(const Championship& championship,const RoundResult& result,
-                       const std::array<std::uint32_t,3>& lap_times) {
+                       const std::array<std::uint32_t,3>& lap_times,const ResultPresenter& present) {
     const auto outcome=championship.outcome();
     const bool failed=outcome==ChampionshipOutcome::retry || outcome==ChampionshipOutcome::game_over;
     std::wstring heading=L"RACE RESULTS";
@@ -483,11 +483,11 @@ bool show_round_result(const Championship& championship,const RoundResult& resul
         details<<L"Time carried    "<<std::min<unsigned>(99,result.remaining_seconds)<<L" s      Spare cars    "<<championship.credits();
         if(outcome==ChampionshipOutcome::bonus) action=L"Bonus Trax";
     }
-    return show_game_result({heading,subtitle,details.str(),action,
+    return present({heading,subtitle,details.str(),action,
         outcome==ChampionshipOutcome::game_over?L"":L"Back to menu"});
 }
 
-void show_class_result(const Championship& championship,const ChampionshipProgress& progress) {
+void show_class_result(const Championship& championship,const ChampionshipProgress& progress,const ResultPresenter& present) {
     std::wostringstream text;
     for(const auto& race:championship.results())
         text<<wide(course_definition(race.course).name)<<L"     "<<race_time(race.elapsed_centiseconds)<<L"\r\n";
@@ -499,6 +499,6 @@ void show_class_result(const Championship& championship,const ChampionshipProgre
         text<<++position<<L".     "<<wide(record.initials)<<L"     "<<race_time(record.total())<<L"\r\n";
     auto subtitle=wide(class_name(championship.league()))+(cleared?L"   /   Championship complete":L"   /   Game over");
     if(cleared && championship.league()==SpeedClass::expert) subtitle+=L"   /   Master available";
-    show_game_result({L"CLASS RESULTS",subtitle,text.str(),L"Back to menu",L""});
+    present({L"CLASS RESULTS",subtitle,text.str(),L"Back to menu",L""});
 }
 }

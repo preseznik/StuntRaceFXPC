@@ -27,7 +27,7 @@ public:
     RacePosition trigger_position() const { return trigger_; }
     void cpu_step(bool streamed,const VehicleState& player,std::uint16_t laps,
                   std::span<const ActivationCell> cells={});
-    void integrate(std::span<const CollisionShape>,const std::array<Vehicle,4>& racers);
+    void integrate(std::span<const CollisionShape>,std::span<const Vehicle> racers);
     static constexpr std::uint32_t first_body_id=0x80000000u;
     const VehicleState* body(std::uint32_t id) const;
     void append_debris(std::span<const SceneryPose> debris) {poses_.insert(poses_.end(),debris.begin(),debris.end());}

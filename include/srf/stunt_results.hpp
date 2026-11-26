@@ -6,7 +6,7 @@
 
 namespace srf {
 enum class StuntPage { drive, time_up, finish_line, finish, records, retry, change_car };
-enum class StuntExit { quit, restart, retry_finish, retry_timeout, course, menu };
+enum class StuntExit { quit, restart, retry_finish, retry_timeout, course };
 
 class StuntResults {
     std::uint16_t previous_=0xffff;

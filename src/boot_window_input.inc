@@ -3,8 +3,12 @@ namespace {
 struct BootWindowInput {
     bool quit{},escape{};
     std::array<bool,256> down{},blocked{};
+    void suppress_held() {
+        escape=false;
+        for(unsigned i=0;i<down.size();++i)blocked[i]=blocked[i] || down[i];
+    }
+    bool key(unsigned k) const {return down[k] && !blocked[k];}
     std::uint16_t held() const {
-        const auto key=[&](unsigned k){return down[k] && !blocked[k];};
         std::uint16_t pad=0;
         if(key(VK_RETURN))pad|=0x1000;
         if(key(VK_SPACE) || key('Z'))pad|=0x8000;
@@ -32,7 +36,7 @@ LRESULT CALLBACK boot_window_proc(HWND window,UINT message,WPARAM key,LPARAM dat
         }
         if((message==WM_KEYDOWN || message==WM_KEYUP) && key<input->down.size()) {
             const bool pressed=message==WM_KEYDOWN;
-            if(key==VK_ESCAPE && pressed && !input->down[key] && !input->blocked[key])input->escape=true;
+            if(key==VK_ESCAPE && pressed && !(data&(1L<<30)) && !input->down[key] && !input->blocked[key])input->escape=true;
             input->down[key]=pressed;
             if(!pressed)input->blocked[key]=false;
             return 0;

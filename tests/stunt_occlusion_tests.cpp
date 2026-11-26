@@ -12,6 +12,52 @@ std::vector<std::size_t> changed_pixels(const std::vector<BYTE>& a,const std::ve
     return result;
 }
 
+void verify_blue_lake_water(const srf::Rom& rom,const std::filesystem::path& output) {
+    const auto course=srf::StuntCourse::blue_lake;
+    srf::RockFieldSession session(rom,srf::PlayerCar::four_wd,course);
+    const auto inputs=read_inputs(std::filesystem::path(SRF_TEST_FIXTURES)/"blue_lake_4wd_inputs.csv");
+    while(session.drive.phase()<118)session.advance(inputs.at(session.drive.phase()).buttons);
+    const auto& car=session.drive.player();
+    const auto world=srf::extract_world(rom,session.drive.scene());
+    const auto pose=vehicle_pose(rom,car,car,true,1,static_cast<std::uint8_t>(car.body.word(0x24)>>8));
+    for(const auto look:{RaceLook::classic,RaceLook::n64,RaceLook::remastered}) {
+        RaceGraphics graphics{};graphics.look=look;
+        Renderer renderer(nullptr,nullptr,0,graphics);
+        srf::generated::CoursePackage colors{};
+        colors.day_palette=colors.dusk_palette=srf::extract_rock_field_palette(rom,course);
+        renderer.set_course_colors(colors);
+        // Classic sorts its faces when loading the world, using the current camera.
+        renderer.load_world(world,0);
+        chase_camera(renderer,pose,lerp_angle(car.body.word(0x24),car.body.word(0x24),1),{},srf::CourseId::easy_ride);
+        const auto render=[&](std::optional<srf::StuntCourse> selected) {
+            renderer.select_course(std::nullopt,selected);
+            renderer.load_textures(srf::extract_rock_field_sprites(rom,course));
+            renderer.load_backdrop(srf::extract_rock_field_backdrop(rom,course));
+            renderer.set_environment({});
+            renderer.load_stunt_world(world,pose,rom,session);
+            renderer.render();
+            return renderer.readback_bgra();
+        };
+        const auto backdrop=render({}),water=render(course);
+        if(look==RaceLook::classic) {
+            if(water!=backdrop)throw std::runtime_error("Blue Lake changed the Classic course backdrop");
+            continue;
+        }
+        unsigned visible=0,detail=0;
+        for(unsigned y=controls.height/2;y<controls.height;++y)for(unsigned x=1;x<controls.width;++x) {
+            const auto i=4*(y*controls.width+x);
+            // Compare neighbouring pixels that used to be the same blue gradient band.
+            if(backdrop[i]<180 || backdrop[i]<backdrop[i+2]+80 ||
+               !std::equal(backdrop.begin()+i,backdrop.begin()+i+3,backdrop.begin()+i-4))continue;
+            if(water[i]<=water[i+2]+20 || water[i]==backdrop[i])continue;
+            ++visible;
+            if(water[i]!=water[i-4] || water[i+1]!=water[i-3])++detail;
+        }
+        if(!output.empty())renderer.screenshot(output/(look==RaceLook::n64?"blue-lake-n64.png":"blue-lake-remastered.png"));
+        if(visible<2000 || detail<visible/20)throw std::runtime_error("Blue Lake water lacks visible surface texture");
+    }
+}
+
 void verify_stereo_crest(Renderer& renderer,const srf::World& world,const auto& load_variant,
                          unsigned phase,const std::filesystem::path& output) {
     auto no_ramp=world;
@@ -95,6 +141,8 @@ int wmain(int argc,wchar_t** argv) {
         const auto route=read_stunt_controls(std::filesystem::path(SRF_TEST_FIXTURES)/"up_down_native_inputs.csv","4wd");
         check(CoInitializeEx(nullptr,COINIT_MULTITHREADED),"COM");
         controls=Controls{};controls.world=controls.race=true;controls.width=960;controls.height=540;
+        verify_blue_lake_water(rom,output);
+        controls=Controls{};controls.world=controls.race=true;controls.width=960;controls.height=540;
         Renderer renderer(nullptr);
         srf::generated::CoursePackage palette{};
         palette.day_palette=palette.dusk_palette=srf::extract_rock_field_palette(rom,course);
@@ -113,7 +161,7 @@ int wmain(int argc,wchar_t** argv) {
             const auto pose=vehicle_pose(rom,car,car,true,1,static_cast<std::uint8_t>(car.body.word(0x24)>>8));
             chase_camera(renderer,pose,lerp_angle(car.body.word(0x24),car.body.word(0x24),1),{},srf::CourseId::easy_ride);
             hud.draw(renderer,car,session.rules,session.tick,session.released,true);
-            renderer.load_stunt_world(world,pose,rom,drive,session.rules);renderer.render();
+            renderer.load_stunt_world(world,pose,rom,session);renderer.render();
             const auto normal=renderer.readback_bgra();
             if(!output.empty())renderer.screenshot(output/(std::to_string(phase)+"-game.png"));
             auto stars=std::vector<srf::SceneryPose>(session.rules.star_poses().begin(),session.rules.star_poses().end());

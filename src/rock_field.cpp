@@ -68,6 +68,8 @@ RockFieldDrive::RockFieldDrive(const Rom& rom,PlayerCar car,StuntCourse course,S
     if(marker==scene_.objects.end() || spawn==scene_.objects.end())
         throw std::runtime_error("Stunt Trax trailer or player placement missing");
     trailer_[0]={marker->command_offset,marker->template_word,marker->position,marker->orientation,0,0,15};
+    // Blue Lake shares the per-car trailer sequence. Its truck sits farther north.
+    if(course==StuntCourse::blue_lake)intro_z_offset_=marker->position.z-(-25408);
     trailer_[1]={marker->command_offset,rom.u16(Rom::lorom_offset(0x08eddf)+1),marker->position,marker->orientation};
     // The truck has no regular scene-command collision descriptor.
     const auto floor=Rom::lorom_offset(0x08ee24);
@@ -120,7 +122,7 @@ unsigned RockFieldDrive::first_clock_field() const {return intros[intro_].clock_
 std::array<std::int16_t,5> RockFieldDrive::trailer_camera() const {
     const auto samples=intros[intro_].eye;
     const auto eye=std::prev(std::ranges::upper_bound(samples,static_cast<int>(field_),{},&IntroEye::tick));
-    return {std::int16_t(trailer_[0].position.x),eye->y,eye->z,eye->pitch,0};
+    return {std::int16_t(trailer_[0].position.x),eye->y,std::int16_t(eye->z+intro_z_offset_),eye->pitch,0};
 }
 
 bool RockFieldDrive::advance_intro(std::uint16_t requested,std::optional<std::int16_t> steering) {

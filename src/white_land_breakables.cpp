@@ -22,6 +22,18 @@ WhiteLandBreakables::WhiteLandBreakables(const Rom& rom) {
     scale_=rom.bytes()[descriptor+7];
     reset();
 }
+void update_white_land_grip(VehicleState& car,std::uint32_t callback,bool entering,std::uint16_t lap,
+                            std::uint64_t phase,std::optional<std::uint64_t>& storm_phase) {
+    auto& surface=car.word(0x8a);
+    if(entering && (!storm_phase || phase-*storm_phase<47)){
+        if(callback==0x09a458)surface&=0x00fd;
+        if(callback==0x09a4e7)surface|=2;
+    }
+    if(callback==0x09a574 && !storm_phase && lap==1){
+        storm_phase=phase;
+        surface&=0x00fd;
+    }
+}
 void WhiteLandBreakables::reset() {
     fragments_.clear();broken_.clear();sprites_.clear();meshes_.clear();effects_.clear();
     next_id_=first_body_id;
@@ -37,12 +49,23 @@ void WhiteLandBreakables::sprite(std::uint32_t command,const VehicleState& state
     sprites_.push_back({command,{p[0],p[1],p[2]},table,
                         static_cast<std::uint16_t>(original_sprite_diameter(radius_,scale_,size))});
 }
+ScenerySprite WhiteLandBreakables::intact_sprite(const NativeProp& prop) const {
+    const auto p=position(prop.state);
+    return {prop.command_offset,{p[0],p[1],p[2]},0x996d,
+            static_cast<std::uint16_t>(original_sprite_diameter(radius_,scale_,100))};
+}
+void WhiteLandBreakables::spawn_snowball_fragments(const SunsetRocks& balls) {
+    constexpr std::array<FragmentParameters,4> snow{{
+        {{40,-85,0},20},{{-40,-85,0},3},{{0,-90,40},10},{{0,-90,-40},1}
+    }};
+    for(const auto& p:balls.fragment_origins())spawn(balls.trigger_id(),p,snow);
+}
 void WhiteLandBreakables::update_solid(const NativeProp& prop,bool active,bool player_contact) {
     if(!active || std::any_of(broken_.begin(),broken_.end(),[&](const auto& b){
         return b.command==prop.command_offset;
     }))return;
     if(!player_contact) {
-        sprite(prop.command_offset,prop.state,0x996d,100);
+        sprites_.push_back(intact_sprite(prop));
         return;
     }
     broken_.push_back({prop.command_offset,0});
@@ -101,7 +124,7 @@ const VehicleState* WhiteLandBreakables::body(std::uint32_t id) const {
     return it==fragments_.end()?nullptr:&it->state;
 }
 void WhiteLandBreakables::integrate(std::span<const CollisionShape> shapes,std::span<const std::uint32_t> order,
-                                    std::span<const NativeProp> props,const std::array<Vehicle,4>& cars,std::span<const VehicleState* const> rock_bodies) {
+                                    std::span<const NativeProp> props,std::span<const Vehicle> cars,std::span<const VehicleState* const> rock_bodies) {
     // Children have zero extents, so they never overlap one another. Preserve
     // the original terrain/solid/car candidate order and cache car velocity.
     std::int16_t last_plane_magnitude=0;

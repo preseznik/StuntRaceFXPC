@@ -136,6 +136,79 @@ void qualification() {
     check(bonus.credits() == 3 && bonus.carry_seconds() == 39, "Retiring dropped trailer award");
 }
 
+void course_records(const std::filesystem::path& file) {
+    {
+        // Old files only stored the best three completed classes.
+        std::ofstream old(file);
+        old << "SPEED-TRAX 1 2\n0 1 \"AAA\" 9000 9100 9200 9300\n"
+               "0 0 \"BBB\" 8900 9600 9700 9800\nEND\n";
+    }
+    auto fast = ChampionshipProgress::load(file);
+    auto slow = ChampionshipProgress::load(file);
+    check(fast.course_best(CourseId::easy_ride) == 8900 && fast.course_best(CourseId::aqua_tunnel) == 9100,
+          "Legacy individual course bests were lost");
+    Championship first(SpeedClass::expert, PlayerCar::four_wd);
+    first.finish({first.course(), RaceFailure::none, 1, 10, 8000}, fast);
+    fast.save(file);
+    Championship later(SpeedClass::expert, PlayerCar::coupe);
+    later.finish({later.course(), RaceFailure::none, 2, 5, 8200}, slow);
+    slow.save(file);
+    auto reopened = ChampionshipProgress::load(file);
+    check(reopened.course_best(first.course()) == 8000 && !reopened.cleared(SpeedClass::expert),
+          "Independent slower run replaced a best or unlocked a class");
+    first.advance();
+    first.finish({first.course(), RaceFailure::time_out, 0, 0, 2500}, reopened);
+    check(!reopened.course_best(first.course()), "Incomplete run set a best");
+    first.advance();
+    first.finish({first.course(), RaceFailure::none, 4, 1, 9999}, reopened);
+    reopened.save(file);
+    check(ChampionshipProgress::load(file).course_best(first.course()) == 9999,
+          "Completed race lost its course time on rank out");
+    std::filesystem::remove(file);
+}
+
+void checkpoints(const std::filesystem::path& file) {
+    ChampionshipProgress progress;
+    Championship session(SpeedClass::expert, PlayerCar::f_type, "DRV");
+    const GridOrder grid{3,2,4,1};
+    const auto finish = [&](unsigned time) {
+        session.finish({session.course(), RaceFailure::none, 2, 38, time, false, grid}, progress);
+        progress.set_checkpoint(session);
+        progress.save(file);
+        auto reopened = ChampionshipProgress::load(file);
+        check(reopened.checkpoint().has_value(), "Missing class after reopening save");
+        return *reopened.checkpoint();
+    };
+    session = finish(8200);
+    check(session.round()==2 && session.car()==PlayerCar::f_type && session.initials()=="DRV" &&
+          session.credits()==2 && session.carry_seconds()==38 && session.total_centiseconds()==8200,
+          "Wrong grid after resuming round two");
+    session = finish(8100);
+    check(session.outcome()==ChampionshipOutcome::bonus && session.total_centiseconds()==16300,
+          "Quit on results lost pending bonus");
+    session.finish_bonus(7,1);
+    progress.set_checkpoint(session);
+    progress.save(file);
+    session = *ChampionshipProgress::load(file).checkpoint();
+    check(session.round()==3 && session.carry_seconds()==45 && session.credits()==3 &&
+          session.starting_grid()==grid, "Bonus rewards changed across restart");
+    session.finish({session.course(), RaceFailure::time_out, 4, 0, 5000, false, {2,1,4,3}}, progress);
+    session.advance();
+    progress.set_checkpoint(session);
+    progress.save(file);
+    session = *ChampionshipProgress::load(file).checkpoint();
+    check(session.credits()==2 && session.starting_grid()==GridOrder{2,1,4,3}, "Retry regained a spare or lost grid");
+    session = finish(8000);
+    check(session.round()==4 && session.results().size()==3, "Lost final round");
+    auto stale=ChampionshipProgress::load(file);
+    progress.set_checkpoint(std::nullopt);
+    progress.save(file);
+    stale.set_checkpoint(session);
+    stale.save(file);
+    check(!ChampionshipProgress::load(file).checkpoint(), "Stale writer resurrected a completed class");
+    std::filesystem::remove(file);
+}
+
 void records(const std::filesystem::path& file) {
     auto first = ChampionshipProgress::load(file);
     clear_class(first, SpeedClass::novice, PlayerCar::coupe, "A B", 14001);
@@ -192,6 +265,8 @@ int main() {
             ("srf speed trax " + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
         std::filesystem::create_directory(dir);
         const auto file = dir / "championship.sav";
+        course_records(file);
+        checkpoints(file);
         records(file);
         std::filesystem::remove(file);
         std::filesystem::remove(dir / "championship.sav.lock");

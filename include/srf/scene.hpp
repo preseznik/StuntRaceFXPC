@@ -2,6 +2,8 @@
 
 #include "srf/mesh.hpp"
 #include "srf/course.hpp"
+#include <optional>
+#include <array>
 
 namespace srf {
 // Original script values. The template field feeds the original render list;
@@ -26,11 +28,14 @@ struct ScenePoint {
     std::uint16_t unknown_word;
     bool operator==(const ScenePoint&) const = default;
 };
+struct GridSlot { Vertex position; std::uint8_t orientation; };
 struct Scene {
     std::uint32_t start_offset, coordinate_offset, end_offset;
     std::size_t command_count;
     std::vector<SceneObject> objects;
     std::vector<ScenePoint> points;
+    std::uint16_t surface_flags{};
+    std::array<std::optional<GridSlot>,4> grid{};
 };
 
 Scene extract_easy_ride(const Rom& rom);

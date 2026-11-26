@@ -31,21 +31,7 @@ struct ChampionshipRecord {
     bool operator==(const ChampionshipRecord&) const = default;
 };
 
-class ChampionshipProgress {
-public:
-    bool available(SpeedClass league) const;
-    bool cleared(SpeedClass league) const;
-    std::span<const ChampionshipRecord> records(SpeedClass league) const;
-    std::optional<std::uint32_t> best_split(SpeedClass league, unsigned rounds) const;
-    static ChampionshipProgress load(const std::filesystem::path& file);
-    // Merge independent game sessions before atomically publishing the new records.
-    void save(const std::filesystem::path& file);
-
-private:
-    friend class Championship;
-    void record(SpeedClass league, const ChampionshipRecord& record);
-    std::array<std::vector<ChampionshipRecord>, 3> records_{}, pending_{};
-};
+class ChampionshipProgress;
 
 class Championship {
 public:
@@ -68,6 +54,7 @@ public:
     void finish_bonus(unsigned extra_seconds, unsigned extra_cars);
 
 private:
+    friend class ChampionshipProgress;
     SpeedClass league_;
     PlayerCar car_;
     std::string initials_;
@@ -78,5 +65,29 @@ private:
     ChampionshipOutcome outcome_{ChampionshipOutcome::racing};
     std::optional<std::uint32_t> previous_best_;
     std::array<RoundResult, 4> qualified_{};
+};
+
+class ChampionshipProgress {
+public:
+    bool available(SpeedClass league) const;
+    bool cleared(SpeedClass league) const;
+    std::span<const ChampionshipRecord> records(SpeedClass league) const;
+    std::optional<std::uint32_t> best_split(SpeedClass league, unsigned rounds) const;
+    std::optional<std::uint32_t> course_best(CourseId course) const;
+    const std::optional<Championship>& checkpoint() const { return checkpoint_; }
+    void set_checkpoint(std::optional<Championship> session);
+    static ChampionshipProgress load(const std::filesystem::path& file);
+    // Merge independent game sessions before atomically publishing the new records.
+    void save(const std::filesystem::path& file);
+
+private:
+    friend class Championship;
+    std::optional<Championship> checkpoint_;
+    std::uint64_t checkpoint_revision_{};
+    bool checkpoint_changed_{};
+    void record_course(CourseId course, std::uint32_t time);
+    std::array<std::uint32_t, courses.size()> course_bests_{};
+    void record(SpeedClass league, const ChampionshipRecord& record);
+    std::array<std::vector<ChampionshipRecord>, 3> records_{}, pending_{};
 };
 }

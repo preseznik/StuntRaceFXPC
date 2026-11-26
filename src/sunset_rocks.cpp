@@ -202,7 +202,7 @@ void SunsetRocks::cpu_step(bool streamed,const VehicleState& player,std::uint16_
     }
 }
 
-void SunsetRocks::integrate(std::span<const CollisionShape> shapes,const std::array<Vehicle,4>& racers) {
+void SunsetRocks::integrate(std::span<const CollisionShape> shapes,std::span<const Vehicle> racers) {
     if(!rocks_[0].allocated&&!rocks_[1].allocated)return;
     std::array<std::vector<RockContact>,2> contacts;
     for(unsigned i=0;i<rocks_.size();++i) {

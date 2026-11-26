@@ -55,5 +55,6 @@ private:
     std::optional<MovingDeck> deck_;
     std::vector<CollisionShape> streamed_shapes_;
     unsigned intro_,field_{};
+    int intro_z_offset_{};
 };
 }

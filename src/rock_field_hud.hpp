@@ -1,4 +1,5 @@
 #pragma once
+#include "demo_dashboard.hpp"
 #include "grid_countdown_art.hpp"
 #include "srf/stunt_scores.hpp"
 #include "srf/rock_field_rules.hpp"
@@ -32,7 +33,7 @@ public:
     StuntHud(const Rom& rom,PlayerCar car,StuntCourse course,StuntAttempt attempt):dashboard_(rom,car,true),boost_(rom,0),
         map_(rom,stunt_rom_index(course)),lettering_(rom),signal_(extract_start_light_tiles(rom)),
         palette_(bonus_hud_palette(rom,0xf8960)),
-        cues_(course==StuntCourse::rock_field ? rock_[unsigned(car)] :
+        cues_(course==StuntCourse::rock_field || course==StuntCourse::blue_lake ? rock_[unsigned(car)] :
               (course==StuntCourse::ice_dance ? ice_ : up_down_)[unsigned(attempt)][unsigned(car)]) {}
     void advance(bool boosting,bool driving) {boost_.advance(boosting,driving);}
     std::span<const std::uint32_t> panel(const VehicleState& body,unsigned stars) {
@@ -46,10 +47,9 @@ public:
     }
     bool driving_song_started(unsigned tick) const {return tick>=cues_.start;}
     void draw(Renderer& renderer,const Vehicle& car,const RockFieldRules& rules,unsigned tick,unsigned released,bool show) {
-        if(!show){renderer.clear_bonus_overlay();return;}
         std::fill(overlay_.begin(),overlay_.end(),0);
-        if(tick>=32)lettering_.draw_stunt_clock(overlay_,rules.clock().remaining_seconds,rules.display_bank_seconds(),released>75);
-        if(tick>=158) {
+        if(show && tick>=32)lettering_.draw_stunt_clock(overlay_,rules.clock().remaining_seconds,rules.display_bank_seconds(),released>75);
+        if(show && tick>=158) {
             const int slide=std::clamp(4*(int(tick)-158)-33,-33,5);
             map_.draw_route(overlay_,slide);
             if(tick>=180)map_.draw_marker(overlay_,car,1);
@@ -58,7 +58,7 @@ public:
         const int slide_in=std::min(-8,4*(int(tick)-171)-8);
         const int slide_out=4*std::max(0,int(released)-69);
         if(slide_in-slide_out>-64)draw_start_signal(overlay_,slide_in-slide_out,stage(tick),signal_,palette_);
-        renderer.set_bonus_overlay(overlay_,15,1,40,panel(car.body,rules.stars()));
+        renderer.set_bonus_overlay(overlay_,15,1,40,show?panel(car.body,rules.stars()):std::span<const std::uint32_t>{});
     }
     void ended(Renderer& renderer,const Vehicle& car,const RockFieldRules& rules,bool timeout,unsigned age) {
         std::fill(overlay_.begin(),overlay_.end(),0);
@@ -71,8 +71,8 @@ public:
 
 // BG2 uses the $18:C770 tile sheet, palette $1F:8600 and a separate OBJ car sheet.
 // Draw the finish, records and retry screens at the cartridge's 256x224 resolution.
-class StuntResultsArt {
-    StuntCourse course_;
+class RaceResultsArt {
+protected:
     std::vector<std::uint8_t> font_,cars_;
     std::array<std::array<std::uint32_t,16>,16> colors_;
     std::vector<std::uint32_t> pixels_;
@@ -83,7 +83,7 @@ class StuntResultsArt {
         for(char c:line) {
             if(c!=' ') {
                 if(c>='a'&&c<='z')c=char(c-'a'+'A');
-                const unsigned id=c>='A'&&c<='Z'?10+c-'A':c>='0'&&c<='9'?c-'0':c=='/'?43:c=='\''?38:36;
+                const unsigned id=c>='A'&&c<='Z'?10+c-'A':c>='0'&&c<='9'?c-'0':c=='"'?39:c=='/'?43:c=='\''?38:36;
                 tile(id,x,y,bank);
             }
             x+=8;
@@ -98,23 +98,30 @@ class StuntResultsArt {
         }
     }
     static std::string two(unsigned n) {return std::string{char('0'+n/10%10),char('0'+n%10)};}
-public:
-    StuntResultsArt(const Rom& rom,StuntCourse course):course_(course),font_(unpack_rom_graphics(rom,0x18c770)),
+    explicit RaceResultsArt(const Rom& rom):font_(unpack_rom_graphics(rom,0x18c770)),
         cars_(unpack_rom_graphics(rom,0x18d920)),pixels_(256*224) {
         for(unsigned i=0;i<16;++i)colors_[i]=bonus_hud_palette(rom,0xf8600+i*32);
         DemoDashboard surround(rom);
         const auto base=surround.draw(100,15,0);
         std::copy(base.begin(),base.end(),pixels_.begin());
     }
-    std::span<const std::uint32_t> draw(StuntPage page,const StuntRecord& finish,PlayerCar selected,
-        std::span<const StuntRecord> records,unsigned choice,unsigned age,std::span<const std::uint32_t> panel) {
+    void course_header(std::string_view name,std::string_view initials) {
         for(int y=32;y<160;y+=8)for(int x=24;x<232;x+=8) {
             for(int row=y;row<y+8;++row)std::fill_n(pixels_.begin()+row*256+x,8,colors_[0][0]);
             tile(47,x,y,0);
         }
         frame(32,168);frame(184,216);
-        const auto name=stunt_course_name(course_);
-        text(name,103-4*int(name.size()),47,12);text(finish.initials,192,48,0);
+        text(name,103-4*int(name.size()),47,12);text(initials,192,48,0);
+    }
+};
+
+class StuntResultsArt : public RaceResultsArt {
+    StuntCourse course_;
+public:
+    StuntResultsArt(const Rom& rom,StuntCourse course):RaceResultsArt(rom),course_(course) {}
+    std::span<const std::uint32_t> draw(StuntPage page,const StuntRecord& finish,PlayerCar selected,
+        std::span<const StuntRecord> records,unsigned choice,unsigned age,std::span<const std::uint32_t> panel) {
+        course_header(stunt_course_name(course_),finish.initials);
         if(page==StuntPage::finish) {
             text("STARS --",48,80,2);text(two(std::min(age,finish.stars)),120,80,3);text("/40",136,80,0);
             const unsigned rest=age>finish.stars?age-finish.stars:0;

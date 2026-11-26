@@ -1,7 +1,15 @@
 R"(
 #ifdef ENHANCED_SCENE
-#ifdef N64_MODE
 Texture2D<float4> material_tiles:register(t7);
+#ifdef REMASTERED_LIGHT
+SamplerState asphalt_sampler:register(s3);
+// Sample along the projected road footprint. The minor axis can retain grit
+// across the lane even when the pixel covers a long strip down the road.
+float asphalt_grain(float2 meters,float grains_per_meter) {
+    return material_tiles.Sample(asphalt_sampler,meters*(grains_per_meter/32.)).r;
+}
+#endif
+#ifdef N64_MODE
 float3 triangle_sample(float2 uv,int mip) {
     int size=32>>mip;
     float2 texel=uv*size-.5, f=frac(texel);
@@ -34,6 +42,19 @@ float grain(float2 p) {
     float a=lerp(grain_hash(i),grain_hash(i+float2(1,0)),f.x);
     float b=lerp(grain_hash(i+float2(0,1)),grain_hash(i+1),f.x);
     return lerp(lerp(a,b,f.y),.5,saturate(max(width.x,width.y)-.35));
+}
+float3 lake_water(float2 p,float seconds) {
+    float sand=grain(p*.48);
+#ifdef N64_MODE
+    float gravel=filtered_tile(p*.36).r;
+    float ripple=filtered_tile(p*float2(.12,.36)).g;
+#else
+    float gravel=grain(p*5.5);
+    float2 wave=p+seconds*float2(.10,-.22);
+    float ripple=grain(wave*float2(.7,3.2)+1.6*grain(wave*.4));
+#endif
+    float3 bed=lerp(float3(.23,.43,.44),float3(.55,.66,.58),.66*sand+.34*gravel);
+    return bed+float3(.075,.10,.11)*smoothstep(.56,.86,ripple);
 }
 // Average narrow joints as their period shrinks below a pixel at speed.
 float panel_joint(float meters,float spacing,float half_width) {
@@ -171,7 +192,8 @@ float3 track_material(float3 uv,float3 original) {
 #ifdef N64_MODE
         float aggregate=.24*coarse+.76*filtered_tile(p*.35).r;
 #else
-        float aggregate=.35*coarse+.65*grain(p*27);
+        float aggregate=.22*coarse+.27*asphalt_grain(p,7)+.51*asphalt_grain(p,27)
+                        +.48*(grain(p*36)-.5)+.38*(asphalt_grain(p,64)-.5);
 #endif
         return lerp(float3(.20,.22,.23),float3(.41,.425,.42),aggregate)
                +(original.g-.36)*.20;
@@ -188,7 +210,166 @@ float3 track_material(float3 uv,float3 original) {
     return lerp(float3(.21,.32,.18),float3(.49,.58,.27),.55*coarse+.45*blades)
            +(original.g-.60)*.23;
 }
-float3 scene_material(float3 uv,float3 original) {
+bool icy_road(float layer) { return abs(layer+35)<.5; }
+bool gravel_road(float layer) { return abs(layer+36)<.5; }
+bool palette_pavement(float layer) { return abs(layer+32)<.5 || icy_road(layer) || gravel_road(layer); }
+#if ROAD_DETAIL
+// Palette-tinted roads keep RGB for the original face colour and U for the
+// lateral offset. Sample their grain in world metres in primary and reflected views.
+float road_coordinates(inout float3 uv,float3 color,float2 world_meters) {
+    if(!palette_pavement(uv.z))return color.r;
+    float across=uv.x;
+    uv.xy=world_meters;
+    return across;
+}
+// Asphalt carries the signed route offset in the vertex data. Both concrete
+// decks use local coordinates with U across the narrow deck and V along it.
+float wheel_wear(float3 uv,float across) {
+    bool concrete=uv.z < -28.5 && uv.z > -30.5;
+    float lateral=(concrete?uv.x:across)+.5*(grain(uv.xy*.12)-.5);
+    // The underpass widens back into the asphalt wheel paths at both ends.
+    float lane_center=7.5;
+    if(concrete)lane_center=uv.z < -29.5 ? 5.3 : lerp(5.3,7.5,smoothstep(32,42.6,abs(uv.y)));
+    float lane=abs(lateral)-lane_center;
+    return 1-smoothstep(.5,2.,abs(abs(lane)-1.75));
+}
+float3 detailed_road_material(float3 uv,float3 original,float across) {
+    if(uv.z < -32.5) {
+        // The timber runs across the span. Long growth lines meander through
+        // finer fibres, with smoother wood where the tyres cross each board.
+        float bend=grain(uv.xy*float2(.17,.38))-.5;
+        float2 wood=float2(uv.x,uv.y+.23*bend);
+        float rings=grain(wood*float2(.35,5.2))-.5;
+        float fibres=grain(wood*float2(1.6,31))-.5;
+        // Each native moving slab spans five 128-unit boards.
+        float pitch=128./90.;
+        float seam=panel_joint(uv.y+.5*pitch,pitch,.025);
+        float wear=wheel_wear(uv,uv.x);
+        return original*(1+.25*bend+(.44*rings+.24*fibres)*(1-.55*wear)-.09*wear-.26*seam);
+    }
+    float stones=grain(uv.xy*21)-.5;
+    float flecks=grain(uv.xy*48)-.5;
+    if(uv.z < -31.5 || uv.z > -26.5) {
+        float wear=wheel_wear(uv,across);
+        float mottling=grain(uv.xy*.74)-.5;
+        float aggregate=(.09*(asphalt_grain(uv.xy,6)-.5)+.20*(asphalt_grain(uv.xy,21)-.5)
+                         +.12*(asphalt_grain(uv.xy,48)-.5)+.08*flecks)*(1-.70*wear);
+        if(uv.z < -31.5)return original*(1+.26*mottling+2.8*aggregate)*(1-.14*wear);
+        return (float3(.285,.297,.30)+mottling*.084+aggregate)*(1-.14*wear);
+    }
+    if(uv.z < -30.5) {
+        // Alternating raised lozenges on the tunnel cross ties. Fade the tread
+        // into the brushed steel as its spacing approaches a pixel.
+        float2 diagonal=float2(uv.x+uv.y,uv.x-uv.y);
+        float tread=max(panel_joint(diagonal.x,.48,.045)*panel_joint(diagonal.y,1.2,.22),
+                        panel_joint(diagonal.y,.48,.045)*panel_joint(diagonal.x+.6,1.2,.22));
+        return float3(.22,.28,.29)*(1+.48*tread+.12*stones);
+    }
+    if(uv.z < -28.5) {
+        float3 slab=track_material(float3(uv.xy,uv.z < -29.5 ? -7 : -6),original);
+        float wear=wheel_wear(uv,0);
+        return slab*(1-.14*wear)+(stones*.11+flecks*.07)*(1-.77*wear);
+    }
+    float chip=smoothstep(.4,.72,grain(uv.xy*6.7))*(uv.z < -27.5 ? .72 : .14);
+    return lerp(original*.89,float3(.53,.50,.45),chip)+.09*stones+.06*flecks;
+}
+#endif
+float3 scene_material(float3 uv,float3 original,float seconds,float across=0) {
+#if ROADSIDE_SCENERY
+    if(uv.z < -49.5) {
+        // A mineral tide mark separates the damp lower wall from dry concrete.
+        float height=uv.y-.62-.13*grain(float2(uv.x*.85,0));
+        float damp=1-smoothstep(-.04,.04,height);
+        original*=lerp(float3(1,1,1),float3(.32,.46,.40),damp);
+        original+=.18*(1-smoothstep(.015,.065,abs(height)));
+        uv.z=-43;
+    }
+    if(uv.z < -48.5) {
+        // Broad, irregular wind grooves cross the drift. Use the same snow
+        // grain as the adjacent verge underneath, including its distance filter.
+        float2 wind=float2(uv.x+.38*uv.y,uv.y-.38*uv.x);
+        wind.y+=1.3*grain(wind*.20);
+        float grooves=smoothstep(.34,.77,grain(wind*float2(.55,2.8)));
+        original*=lerp(float3(.70,.78,.86),float3(1,1,1),grooves);
+        uv.z=-23;
+    }
+    if(uv.z < -47.5) {
+        float rust=smoothstep(.52,.76,grain(uv.xy*3.1));
+        return lerp(track_material(float3(uv.xy,-5),original),float3(.35,.22,.14),.72*rust);
+    }
+    if(abs(uv.z+46)<.1)return original; // Amber lens, lit by the car's headlights.
+    if(uv.z < -44.5) {
+        float stones=asphalt_grain(uv.xy,9)-.5;
+        float pebbles=smoothstep(.36,.75,grain(uv.xy*2.4));
+        return float3(.40,.385,.34)*(.82+.41*pebbles+.77*stones);
+    }
+    if(uv.z < -43.5) {
+        float edge=min(uv.x,1-uv.x);
+        float flange=1-smoothstep(.055,.095,edge);
+        float plate=panel_joint(uv.y,3.6,.045);
+        float bolt=painted_rect(float2(edge,uv.y-1.8*round(uv.y/1.8)),float2(.12,0),float2(.027,.09));
+        float scuff=grain(float2(uv.x*11,uv.y*2))-.5;
+        return lerp(float3(.31,.39,.42),original,.23)*(.9+.16*scuff+.34*flange-.36*plate)+.19*bolt;
+    }
+    if(uv.z < -42.5) {
+        float joints=max(panel_joint(uv.x,5.6,.055),panel_joint(uv.y,3.4,.04));
+        float streak=grain(uv.xy*float2(1.2,.15))-.5;
+        float aggregate=asphalt_grain(uv.xy,8)-.5;
+        return lerp(original,float3(.56,.55,.49),.43)*(.94+.25*streak+.30*aggregate-.28*joints);
+    }
+    if(uv.z < -40.5) {
+        // Use the native canyon colour at the current stage of dusk.
+        float chips=asphalt_grain(uv.xy,5)-.5;
+        if(uv.z < -41.5) {
+            float pebbles=smoothstep(.40,.76,grain(uv.xy*1.9));
+            return original*(.76+.39*pebbles+.42*chips);
+        }
+        float seam=uv.y*.31+.53*grain(uv.xy*.12);
+        float bedding=panel_joint(seam,1,.085);
+        return original*(.93+.36*(grain(uv.xy*.7)-.5)+.29*chips-.29*bedding);
+    }
+    if(uv.z < -38.5) {
+        bool coast=uv.z < -39.5;
+        float3 grass=coast ? track_material(float3(uv.xy,-9),float3(original.rg,0))
+                          : track_material(float3(uv.xy,-3),float3(1,.60,0));
+        float edge=coast?original.b:original.r;
+        if(edge>=1)return grass;
+        float distance=edge+.13*(grain(uv.xy*.20)-.5);
+        float speck=grain(uv.xy*8)-.5;
+        float3 stones=float3(.48,.44,.36)+.26*speck;
+        float leaves=smoothstep(.47,.74,grain(uv.xy*float2(2.7,4.1)));
+        float3 litter=lerp(float3(.27,.24,.14),float3(.53,.41,.22),leaves)+.14*speck;
+        return lerp(lerp(stones,litter,smoothstep(.10,.32,distance)),grass,smoothstep(.34,.93,distance));
+    }
+    if(uv.z < -36.5) {
+        float furrows=grain(uv.xy*float2(4,.65));
+        return original*(.59+.56*furrows+.28*grain(uv.xy*float2(12,2)));
+    }
+#endif
+#if ROAD_DETAIL
+    if(gravel_road(uv.z)) {
+        // Coarse stones stand out between the compacted tracks in the rock field.
+        float wear=wheel_wear(uv,across);
+        float soil=grain(uv.xy*.65)-.5;
+        float stones=smoothstep(.42,.8,grain(uv.xy*7))-.4;
+        return original*(1+.30*soil+.56*stones*(1-.7*wear)-.17*wear);
+    }
+    if(icy_road(uv.z)) {
+        // Frost collects across the lane. Tyres rub clear two smoother tracks.
+        float wear=wheel_wear(uv,across);
+        float drift=grain(uv.xy*float2(.38,.12));
+        float frost=grain(uv.xy*float2(.9,4.5)+drift)-.5;
+        float crystals=grain(uv.xy*15)-.5;
+        float relief=(.25*frost+.22*crystals)*(1-.65*wear);
+        return original*(.98+.14*(drift-.5)+relief-.065*wear);
+    }
+    if(uv.z < -33.5)return lake_water(uv.xy,seconds)*float3(.42,1.07,1.45); // Sea Breeze shallows
+    if(uv.z < -25.5)return detailed_road_material(uv,original,across);
+#endif
+#if RAY_WET_REFLECTIONS || MATERIAL_ROUGHNESS
+    if(uv.z < -24.5)return original; // Road paint.
+#endif
+    if(uv.z < -23.5)return lake_water(uv.xy,seconds);
     if(uv.z < -20.5) {
 #ifdef N64_MODE
         float grit=filtered_tile(uv.xy*.32).r-.5;
@@ -204,6 +385,9 @@ float3 scene_material(float3 uv,float3 original) {
             float strata=grain(float2(uv.x*.12,uv.y*.95+.7*grain(uv.xy*.11)))-.5;
             return original*(1+.34*strata+.14*grit);
         }
+#ifdef REMASTERED_LIGHT
+        grit=.32*(asphalt_grain(uv.xy,6)-.5)+.68*(asphalt_grain(uv.xy,22)-.5);
+#endif
         return original*(1+.18*grit+.12*(grain(uv.xy*.62)-.5));
     }
     return uv.z < -10.5 ? building_material(uv.xy,round(uv.z),original) : track_material(uv,original);

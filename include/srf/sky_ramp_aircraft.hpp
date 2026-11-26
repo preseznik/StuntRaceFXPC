@@ -10,12 +10,14 @@ public:
     void reset();
     void spawn(std::uint32_t command,Vertex trigger);
     void step(std::span<const ActivationCell> cells);
-    void record_contact(const VehicleState& player);
+    void record_contacts(std::span<const Vehicle>);
+    void record_contact(const VehicleState& player,const VehicleState* other=nullptr);
     const VehicleState* body() const {return attached_?&body_:nullptr;}
     std::span<const SceneryPose> poses() const {return visible_?std::span(&pose_,1):std::span<const SceneryPose>{};}
     std::span<const ScenerySprite> sprites() const {return sprites_;}
     std::span<const std::uint8_t> effects() const {return effects_;}
 private:
+    bool touches(const VehicleState&) const;
     struct Smoke {ScenerySprite sprite;std::uint8_t life,timer;};
     SceneryPose pose_{};
     Vertex target_{};

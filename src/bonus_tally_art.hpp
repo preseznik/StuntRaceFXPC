@@ -135,6 +135,21 @@ public:
         }
     }
 
+    void draw_goal(std::span<std::uint32_t> art,unsigned tick) const {
+        constexpr unsigned glyphs[]{0x800,0xc00,0x408,0x814};
+        for(int i=0;i<4;++i) {
+            const int t=std::clamp(int(tick)-4*i,0,30);
+            const int rise=(30-t)*(30-t)/18;
+            blit(art,glyphs[i],64+20*i,32+rise-3*i,16,32,pink);
+        }
+    }
+    void draw_finish_time(std::span<std::uint32_t> art,unsigned seconds,unsigned transferred,unsigned stage) const {
+        const auto green=inks(5,11);
+        digits(art,seconds-transferred,172,32,green);
+        digits(art,transferred,4,32,green);
+        banner(art,std::min(stage,4u));
+    }
+
     void draw_grid_laps(std::span<std::uint32_t> art,unsigned phase) const {
         if(phase<25 || phase>=44)return;
         // CPU07:8388..8498 scrolls each glyph through the same 32-row

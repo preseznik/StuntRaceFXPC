@@ -387,6 +387,17 @@ WorldPalette extract_world_palette(const Rom& rom,CourseId course,bool dusk) {
     return indexed_world_palette(rom,static_cast<unsigned>(course_definition(course).id),dusk);
 }
 
+WorldPalette extract_local_palette(const Rom& rom,unsigned index) {
+    auto palette=indexed_world_palette(rom,index,false);
+    if(index>=16 && index<=19){
+        // Battle uses the split-screen material layout. The PC mesh and sprite shaders
+        // use the full-resolution material indices, including when rendering two views.
+        const auto full=extract_world_palette(rom,CourseId::easy_ride);
+        std::copy(full.begin()+16,full.end(),palette.begin()+16);
+    }
+    return palette;
+}
+
 WorldPalette extract_rock_field_palette(const Rom& rom,StuntCourse course) {
     return indexed_world_palette(rom,stunt_rom_index(course),false);
 }
@@ -426,8 +437,8 @@ WorldMaterials extract_world_materials(const Rom& rom, CourseId course) {
 }
 
 static std::vector<WorldSprite> extract_sprites(const Rom& rom, CourseId course, bool dusk,
-                                                bool include_loading_car,bool demo,std::optional<StuntCourse> stunt={}) {
-    const auto b=rom.bytes(); const auto palette=stunt?extract_rock_field_palette(rom,*stunt):extract_world_palette(rom,course,dusk);
+                                                bool include_loading_car,bool demo,std::optional<unsigned> palette_index={}) {
+    const auto b=rom.bytes(); const auto palette=palette_index?extract_local_palette(rom,*palette_index):extract_world_palette(rom,course,dusk);
     const bool indexed=course==CourseId::kings_forest || course==CourseId::white_land ||
                        course==CourseId::night_cruise || course==CourseId::lake_side || course==CourseId::big_ravine ||
                        course==CourseId::sky_ramp || course==CourseId::harbor_city;
@@ -536,8 +547,12 @@ std::vector<WorldSprite> extract_easy_ride_demo_sprites(const Rom& rom) {
     return extract_sprites(rom,CourseId::easy_ride,false,false,true);
 }
 
+std::vector<WorldSprite> extract_local_sprites(const Rom& rom,unsigned index) {
+    return extract_sprites(rom,CourseId::easy_ride,false,false,false,index);
+}
+
 std::vector<WorldSprite> extract_rock_field_sprites(const Rom& rom,StuntCourse course) {
-    return extract_sprites(rom,CourseId::easy_ride,false,false,false,course);
+    return extract_sprites(rom,CourseId::easy_ride,false,false,false,stunt_rom_index(course));
 }
 
 std::vector<std::uint8_t> encode_world_sprites(const std::vector<WorldSprite>& sprites) {

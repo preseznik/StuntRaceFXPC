@@ -188,6 +188,10 @@ CourseBackdrop extract_speed_bonus_backdrop(const Rom& rom) {
     return extract_indexed_backdrop(rom,20,CourseId::easy_ride);
 }
 
+CourseBackdrop extract_local_backdrop(const Rom& rom,unsigned index) {
+    return extract_indexed_backdrop(rom,index,CourseId::easy_ride);
+}
+
 CourseBackdrop extract_rock_field_backdrop(const Rom& rom,StuntCourse course) {
     return extract_indexed_backdrop(rom,stunt_rom_index(course),CourseId::easy_ride);
 }

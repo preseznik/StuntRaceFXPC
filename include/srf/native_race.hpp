@@ -15,6 +15,23 @@ namespace srf {
 enum class PlayerCar : std::uint8_t { coupe, four_wd, f_type };
 // One-based course grid slots, indexed by the stable actor order in racers().
 using GridOrder=std::array<std::uint16_t,4>;
+// One animation clock per physical deck. Rendering and wheel contacts use the same frame.
+class CourseBridges {
+public:
+    CourseBridges() = default;
+    CourseBridges(const Rom&,const Scene&,std::span<const CollisionShape>,const StreamingCourse&);
+    void reset(std::span<CollisionShape>);
+    void advance(const CollisionStreamState&,std::span<CollisionShape>);
+    std::span<const SceneryPose> poses() const { return bridge_poses_; }
+private:
+    struct Bridge {
+        std::size_t shape, stream;
+        CollisionAnimation animation;
+        std::optional<std::uint8_t> fixed_pose;
+    };
+    std::vector<Bridge> bridges_;
+    std::vector<SceneryPose> bridge_poses_;
+};
 // One step is one original GSU update phase, independent of presentation.
 // Input is the original native vehicle control word: left1/right2,
 // throttle0x10/reverse0x20/brake0x40/boost0x400.
@@ -47,7 +64,7 @@ public:
     std::span<const std::uint8_t> cone_effects() const { return course_==CourseId::night_owl?movable_props_.effects():std::span<const std::uint8_t>{}; }
     std::span<const SceneryPose> prop_poses() const { return course_==CourseId::night_owl?std::span<const SceneryPose>{}:movable_props_.poses(); }
     std::span<const std::uint8_t> prop_effects() const { return course_==CourseId::night_owl?std::span<const std::uint8_t>{}:movable_props_.effects(); }
-    std::span<const SceneryPose> bridge_poses() const { return bridge_poses_; }
+    std::span<const SceneryPose> bridge_poses() const { return bridges_.poses(); }
     std::span<const SceneryPose> pickup_poses() const { return pickup_poses_; }
     std::span<const std::uint8_t> pickup_effects() const { return pickup_effects_; }
     std::span<const SceneryPose> bonus_poses() const {
@@ -72,6 +89,11 @@ public:
     // The championship grid supplies locked scene updates until its own green signal.
     void release_start_signal() { countdown_stage_=6; }
     std::uint8_t countdown_stage() const { return countdown_stage_; }
+    struct TimeAward { std::uint64_t phase; std::uint16_t seconds; bool checkpoint; };
+    std::optional<TimeAward> time_award() const {
+        if(last_award_ && phase_-last_award_->phase<28 && !ended())return last_award_;
+        return {};
+    }
     std::uint16_t remaining_seconds() const { return clock_.remaining_seconds; }
     std::uint32_t elapsed_centiseconds() const { return clock_.elapsed_units/100; }
 
@@ -91,13 +113,7 @@ private:
     OpponentTuning opponents_{};
     std::vector<RoutePoint> route_;
     std::vector<CollisionShape> shapes_;
-    struct Bridge {
-        std::size_t shape, stream;
-        CollisionAnimation animation;
-        std::optional<std::uint8_t> fixed_pose;
-    };
-    std::vector<Bridge> bridges_;
-    std::vector<SceneryPose> bridge_poses_;
+    CourseBridges bridges_;
     std::vector<NativeProp> initial_props_, props_;
     bool ravine_traction_armed_{};
     struct Pickup {
@@ -130,6 +146,8 @@ private:
     RaceCompletion completion_{};
     RaceFailure failure_{};
     RaceClockTuning clock_tuning_{};
+    void award_time(std::uint16_t seconds,bool checkpoint);
+    std::optional<TimeAward> last_award_;
     RaceClock clock_{};
     std::uint16_t surface_options_{};
     std::uint16_t frozen_{};

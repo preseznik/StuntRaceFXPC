@@ -4,6 +4,7 @@
 #include "srf/stunt_course.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -44,7 +45,8 @@ struct GameResultPage {
 };
 // True when the driver chooses the primary action. Closing returns to selection.
 bool show_game_result(const GameResultPage& page);
+using ResultPresenter=std::function<bool(const GameResultPage&)>;
 bool show_round_result(const Championship& championship,const RoundResult& result,
-                       const std::array<std::uint32_t,3>& lap_times);
-void show_class_result(const Championship& championship,const ChampionshipProgress& progress);
+                       const std::array<std::uint32_t,3>& lap_times,const ResultPresenter& present=show_game_result);
+void show_class_result(const Championship& championship,const ChampionshipProgress& progress,const ResultPresenter& present=show_game_result);
 }

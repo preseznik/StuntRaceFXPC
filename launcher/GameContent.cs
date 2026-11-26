@@ -2,7 +2,7 @@ namespace StuntRaceFX.Launcher;
 
 internal enum RaceStyle { Original, N64, Remastered }
 
-internal sealed record GameCourse(string Id, string Name, int ReplayPhases, int MinimumContentVersion, int? VrVersion = null)
+internal sealed record GameCourse(string Id, string Name, int ReplayPhases, int MinimumContentVersion, int VrVersion = GameContent.AllCoursesVrVersion)
 {
     public override string ToString() => Name;
 }
@@ -53,15 +53,87 @@ internal static class GameContent
     internal const int HarborCityStyleVersion = 54;
     internal const int CoupeStyleVersion = 55;
     internal const int FTypeStyleVersion = 56;
-    internal const int CurrentVersion = FTypeStyleVersion;
+    internal const int ChampionshipStyleVersion = 57;
+    internal const int StuntStyleVersion = 58;
+    internal const int SeamlessVersion = 60;
+    internal const int AllCarsVrVersion = 64;
+    internal const int NightOwlVrVersion = 65;
+    internal const int ClassicRasterVersion = 66;
+    internal const int RaceHudVersion = 67;
+    internal const int RayShadowsVersion = 70;
+    internal const int RayReflectionsVersion = 71;
+    internal const int IndirectLightVersion = 72;
+    internal const int MaterialFinishVersion = 73;
+    internal const int RoadDetailVersion = 74;
+    internal const int FullRoadDetailVersion = 75;
+    internal const int AquaRoadDetailVersion = 76;
+    internal const int SunsetRoadDetailVersion = 77;
+    internal const int NightOwlRoadDetailVersion = 78;
+    internal const int ForestRoadDetailVersion = 79;
+    internal const int SeaBreezeRoadDetailVersion = 80;
+    internal const int WhiteLandRoadDetailVersion = 81;
+    internal const int NightCruiseRoadDetailVersion = 82;
+    internal const int LakeSideRoadDetailVersion = 83;
+    internal const int BigRavineRoadDetailVersion = 84;
+    internal const int SkyRampRoadDetailVersion = 85;
+    internal const int HarborCityRoadDetailVersion = 86;
+    internal const int ForestSceneryVersion = 87;
+    internal const int ForestCourseSceneryVersion = 88;
+    internal const int EasyRideSceneryVersion = 89;
+    internal const int SunsetSceneryVersion = 90;
+    internal const int AquaSceneryVersion = 91;
+    internal const int OwlSceneryVersion = 92;
+    internal const int SeaBreezeSceneryVersion = 93;
+    internal const int WhiteLandSceneryVersion = 94;
+    internal const int NightCruiseSceneryVersion = 95;
+    internal const int LakeSideSceneryVersion = 96;
+    internal const int BigRavineSceneryVersion = 97;
+    internal const int SkyRampSceneryVersion = 98;
+    internal const int HarborCitySceneryVersion = 99;
+    internal const int WetTireSprayVersion = 100;
+    internal const int AllTrackSprayVersion = 101;
+    internal const int VolumetricLightingVersion = 102;
+    internal const int VrStyleVersion = 103;
+    internal const int AllCoursesVrVersion = 104;
+    internal const int LanVersion = 107;
+    internal const int AquaLanVersion = 108;
+    internal const int SunsetLanVersion = 109;
+    internal const int NightOwlLanVersion = 110;
+    internal const int ForestLanVersion = 111;
+    internal const int SeaBreezeLanVersion = 112;
+    internal const int WhiteLandLanVersion = 113;
+    internal const int NightCruiseLanVersion = 114;
+    internal const int LakeSideLanVersion = 115;
+    internal const int BigRavineLanVersion = 116;
+    internal const int AllSpeedTraxLanVersion = 117;
+    internal const int FourDriverLanVersion = 119;
+    internal const int CurrentVersion = FourDriverLanVersion;
+    internal static readonly IReadOnlyDictionary<string, int> LanCourseVersions = new Dictionary<string, int>
+    {
+        [DefaultCourse] = LanVersion,
+        ["aqua-tunnel"] = AquaLanVersion,
+        ["sunset-valley"] = SunsetLanVersion,
+        ["night-owl"] = NightOwlLanVersion,
+        ["kings-forest"] = ForestLanVersion,
+        ["sea-breeze"] = SeaBreezeLanVersion,
+        ["white-land"] = WhiteLandLanVersion,
+        ["night-cruise"] = NightCruiseLanVersion,
+        ["lake-side"] = LakeSideLanVersion,
+        ["big-ravine"] = BigRavineLanVersion,
+        ["sky-ramp"] = AllSpeedTraxLanVersion,
+        ["harbor-city"] = AllSpeedTraxLanVersion
+    };
+    internal static bool SupportsVr(GameCourse course, string car, int version) =>
+        version >= course.VrVersion &&
+        (car == "4wd" || (car is "coupe" or "f-type") && version >= AllCarsVrVersion);
     internal const int DefaultCameraDistance = 80, MinCameraDistance = 40, MaxCameraDistance = 160;
     internal static readonly string[] CameraIds = ["chase", "far-chase", "cockpit", "bonnet", "isometric"];
     internal static readonly string[] WeatherIds = ["clear", "partly-cloudy", "overcast", "fog", "rain"];
     internal static readonly GameCourse[] Courses = [
         new("easy-ride", "Easy Ride", 1637, 0, 28),
         new("aqua-tunnel", "Aqua Tunnel", 2206, 2, 30),
-        new("sunset-valley", "Sunset Valley", 2117, 3),
-        new("night-owl", "Night Owl", 2722, 4),
+        new("sunset-valley", "Sunset Valley", 2117, 3, AllCarsVrVersion),
+        new("night-owl", "Night Owl", 2722, 4, NightOwlVrVersion),
         new("kings-forest", "King's Forest", 2245, 5),
         new("sea-breeze", "Sea Breeze", 1958, 6),
         new("white-land", "White Land", 2560, 7),

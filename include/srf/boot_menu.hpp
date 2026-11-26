@@ -36,8 +36,8 @@ class BootMenu {
     }
 public:
     explicit BootMenu(PlayerCar initial_car=PlayerCar::four_wd,std::string initials="AAA",
-                      BootMenuEntry entry=BootMenuEntry::title) {
-        f_.car=initial_car;
+                      BootMenuEntry entry=BootMenuEntry::title,unsigned mode=0) {
+        f_.car=initial_car;f_.mode=mode;
         f_.entry=entry;
         if(entry==BootMenuEntry::demo)f_.brightness=0;
         if(initials.size()==3 && std::all_of(initials.begin(),initials.end(),[](char c){return c>='A' && c<='Z';}))
@@ -104,8 +104,7 @@ public:
                 f_.mode=(f_.mode+((edges&0x0800)?3:1))%4;clock_=f_.lettering=0;f_.effect=0x45;
             } else if(confirm) {
                 f_.effect=0x46;
-                if(f_.mode>1)event_=BootMenuEvent::unavailable;
-                else {transition_kind_=Transition::to_car;transition_=0;}
+                transition_kind_=f_.mode==3?Transition::to_board:Transition::to_car;transition_=0;
             }
             return;
         }

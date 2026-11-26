@@ -12,7 +12,7 @@ bool valid(const StuntRecord& r) {
 }
 unsigned score_key(const StuntRecord& r) {return r.stars*100+r.seconds;}
 std::string_view score_header(StuntCourse course) {
-    constexpr std::array headers{"ROCK-FIELD-1","UP-N-DOWN-1","ICE-DANCE-1"};
+    constexpr std::array headers{"ROCK-FIELD-1","UP-N-DOWN-1","ICE-DANCE-1","BLUE-LAKE-1"};
     return headers.at(static_cast<unsigned>(course));
 }
 }

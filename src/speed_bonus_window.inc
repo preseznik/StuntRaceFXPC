@@ -6,8 +6,7 @@
 
 namespace {
 struct BonusWindowState {
-    bool quit{}, retire{}, paused{}, show_hud{true};
-    HWND hud{};
+    bool quit{}, retire{}, paused{};
 };
 LRESULT CALLBACK bonus_window_proc(HWND window,UINT message,WPARAM key,LPARAM data) {
     auto* state=reinterpret_cast<BonusWindowState*>(GetWindowLongPtrW(window,GWLP_USERDATA));
@@ -17,42 +16,14 @@ LRESULT CALLBACK bonus_window_proc(HWND window,UINT message,WPARAM key,LPARAM da
     }
     if(state) {
         if(message==WM_CLOSE){state->quit=true;return 0;}
-        if(message==WM_SIZE && state->hud)
-            MoveWindow(state->hud,8,8,std::max(180,int(LOWORD(data))-16),24,TRUE);
         if(message==WM_KEYDOWN && !(data&(1L<<30))) {
             if(key==VK_ESCAPE)state->retire=true;
             if(key=='P')state->paused=!state->paused;
-            if(key=='H')state->show_hud=!state->show_hud;
+            if(key=='H')race_hud_visible=!race_hud_visible;
         }
     }
     return DefWindowProcW(window,message,key,data);
 }
-struct ChampionshipWindow {
-    Controls previous=controls;
-    HWND window{};
-    ~ChampionshipWindow(){if(window)DestroyWindow(window);controls=previous;}
-
-    void open(const wchar_t* name,const wchar_t* title,WNDPROC proc,void* state,int width,int height,bool borderless) {
-        WNDCLASSW wc{};
-        wc.hInstance=GetModuleHandleW(nullptr);wc.lpfnWndProc=proc;
-        wc.lpszClassName=name;wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);
-        if(!RegisterClassW(&wc) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)
-            throw std::runtime_error("Cannot register championship window");
-        const DWORD style=borderless?WS_POPUP:WS_OVERLAPPEDWINDOW;
-        RECT rect{0,0,width,height};AdjustWindowRect(&rect,style,FALSE);
-        int left=CW_USEDEFAULT,top=CW_USEDEFAULT;
-        if(borderless) {
-            MONITORINFO monitor{sizeof(MONITORINFO)};
-            GetMonitorInfoW(MonitorFromPoint({0,0},MONITOR_DEFAULTTOPRIMARY),&monitor);
-            rect=monitor.rcMonitor;left=rect.left;top=rect.top;
-        }
-        window=CreateWindowExW(0,name,title,style,left,top,rect.right-rect.left,rect.bottom-rect.top,
-                               nullptr,nullptr,wc.hInstance,state);
-        if(!window)throw std::runtime_error("Cannot open championship window");
-        GetClientRect(window,&rect);controls.width=rect.right;controls.height=rect.bottom;
-    }
-};
-
 RenderVehicle bonus_cab(const srf::Rom& rom,const srf::Vehicle& truck,const RenderVehicle& trailer,std::uint8_t camera_yaw) {
     const auto& b=truck.body;
     RenderVehicle cab;
@@ -104,13 +75,14 @@ srf::Vehicle loading_truck_pose(const srf::Vehicle& truck,int grounded_y,bool se
 void render_bonus_scene(Renderer& renderer,const srf::Rom& rom,const srf::World& world,
                         const srf::SpeedBonus& event,const srf::Vehicle& truck,
                         const srf::TrailerLoading& loading,TrailerLoadingView& view,unsigned tick,unsigned spares,bool show_hud,
-                        const srf::BonusTally* tally) {
+                        const srf::BonusTally* tally,bool paused=false) {
     const auto camera_yaw=view.camera(renderer,truck,tick,loading.phase());
     auto trailer=vehicle_pose(rom,truck,truck,true,1,camera_yaw);
     trailer.descriptor=loading.cargo_descriptor();
     std::array<RenderVehicle,3> parts;
     parts[0]=std::move(trailer);
     parts[1]=bonus_cab(rom,truck,parts[0],camera_yaw);
+    parts[0].source_model=parts[1].source_model=true;
     unsigned count=2;
     if(loading.car_visible()) {
         if(const auto distant=loading.distant_car(view.eye_x,view.eye_z,camera_yaw)) {
@@ -120,7 +92,7 @@ void render_bonus_scene(Renderer& renderer,const srf::Rom& rom,const srf::World&
     }
     const auto& ramp=loading.ramp();
     renderer.load_world(world,0,std::span(parts).first(count),&rom,event.gates(),std::span(&ramp,1));
-    view.overlay(renderer,tick,event,spares,show_hud,tally);
+    view.overlay(renderer,tick,event,spares,show_hud,tally,paused);
 }
 }
 
@@ -130,8 +102,8 @@ struct BonusFinish {
     CourseMapEntry entry;
     std::unique_ptr<AudioDevice> audio;
 };
-static std::optional<BonusFinish> play_speed_bonus(const Rom& rom,const Championship& championship,
-    const std::filesystem::path& controller_config,int width,int height,bool borderless) {
+static std::optional<BonusFinish> play_speed_bonus(GameHost& host,const Rom& rom,const Championship& championship,
+    const std::filesystem::path& controller_config) {
     if(championship.outcome()!=ChampionshipOutcome::bonus)throw std::logic_error("No pending Bonus Trax event");
     const auto league=championship.league();
     const auto car=championship.car();
@@ -143,15 +115,16 @@ static std::optional<BonusFinish> play_speed_bonus(const Rom& rom,const Champion
     const auto world=extract_world(rom,event.scene());
     const int grounded_y=signed_word(event.truck().body.word(0x20))+98;
     bool settling=true;
+    WetTireSpray spray;
+    unsigned phase=0;
     BonusWindowState state;
-    ChampionshipWindow scope;
-    controls=Controls{};
+
     controls.world=true;controls.race=true;
-    scope.open(L"StuntRaceFXBonus",L"Stunt Race FX — Bonus Trax",bonus_window_proc,&state,width,height,borderless);
+    GameScreen scope(host,L"Stunt Race FX — Bonus Trax",bonus_window_proc,&state);
     RECT rect{};
-    state.hud=CreateWindowExW(0,L"STATIC",L"  Paused     P resume     Esc retire",WS_CHILD|SS_LEFT,8,8,width-16,24,scope.window,nullptr,GetModuleHandleW(nullptr),nullptr);
-    SendMessageW(state.hud,WM_SETFONT,reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),TRUE);
-    Renderer renderer(scope.window,nullptr,desktop_fps);
+    auto& renderer=*host.presenter;
+    renderer.select_course(std::nullopt);renderer.use_classic_frame(rom);
+    renderer.set_course_colors(generated::course_packages.front());
     renderer.load_textures(extract_vehicle_sprites(rom,CourseId::easy_ride,false,true));
     renderer.load_backdrop(extract_speed_bonus_backdrop(rom));
     renderer.set_environment({});
@@ -186,14 +159,14 @@ static std::optional<BonusFinish> play_speed_bonus(const Rom& rom,const Champion
             }
         }catch(const std::exception& e){std::cerr<<"Bonus tally audio: "<<e.what()<<'\n';audio.reset();}
     };
-    while(!state.quit) {
+    while(!game_closing && !state.quit) {
         MSG msg{};
         while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {
             if(msg.message==WM_QUIT){state.quit=true;break;}
             TranslateMessage(&msg);DispatchMessageW(&msg);
         }
         if(state.quit)break;
-        const bool focused=GetForegroundWindow()==scope.window && !IsIconic(scope.window);
+        const bool focused=game_focused(scope.window);
         auto input=combine_player_input(keyboard_control(scope.window),pad?pad->poll(focused):GamepadInput{});
         if(input.pause) {
             if(state.paused)state.paused=false;
@@ -203,12 +176,12 @@ static std::optional<BonusFinish> play_speed_bonus(const Rom& rom,const Champion
         if(state.retire) {
             if(tally)return std::nullopt;
             pause_audio(true);
-            ShowWindow(scope.window,SW_HIDE);
-            const bool resume=show_game_result({L"RETIRE?",L"Bonus Trax",
+
+            const bool resume=game_result(host,{L"RETIRE?",L"Bonus Trax",
                 L"Retiring forfeits flag time. Spare cars earned for completed laps carry forward.",L"Resume driving",L"Retire"});
             if(!resume)return BonusFinish{event.collected_reward(),CourseMapEntry::retire,{}};
             ShowWindow(scope.window,SW_SHOW);
-            SetForegroundWindow(scope.window);
+
             pause_audio(audio_paused);
             state.retire=false;last=Steady::now();
         }
@@ -247,6 +220,8 @@ static std::optional<BonusFinish> play_speed_bonus(const Rom& rom,const Champion
             accumulator+=1./14+(video_tick-view.drive_tick())*video_period+video_remainder;
         while(accumulator>=1./14) {
             const auto before=event.reward();
+            std::optional<Vehicle> previous_truck;
+            if(renderer.rain_spray_enabled())previous_truck=event.truck();
             if(tally) {
                 view.latch_speed(event);
                 event.coast_after_timeout();
@@ -262,6 +237,11 @@ static std::optional<BonusFinish> play_speed_bonus(const Rom& rom,const Champion
                     play_tally_audio(tally->opening_audio());
                 }
             }
+            ++phase;
+            if(previous_truck) {
+                spray.begin_phase(phase);
+                spray.emit(phase,0,*previous_truck,event.truck());
+            }
             if(signed_word(event.truck().body.word(0x20))>=grounded_y)settling=false;
             if(audio)try {
                 const bool throttle=!tally && (input.requested&0x10)!=0;
@@ -274,14 +254,14 @@ static std::optional<BonusFinish> play_speed_bonus(const Rom& rom,const Champion
             }catch(const std::exception&){audio.reset();}
             accumulator-=1./14;
         }
-        if(bool(IsWindowVisible(state.hud))!=state.paused)ShowWindow(state.hud,state.paused?SW_SHOWNA:SW_HIDE);
-        if(IsIconic(scope.window)){Sleep(30);continue;}
+        if(!game_xr && IsIconic(scope.window)){Sleep(30);continue;}
         GetClientRect(scope.window,&rect);
         if(rect.right>0 && rect.bottom>0 && (controls.width!=unsigned(rect.right) || controls.height!=unsigned(rect.bottom))) {
             controls.width=rect.right;controls.height=rect.bottom;renderer.resize(controls.width,controls.height);
         }
         const auto displayed=loading_truck_pose(event.truck(),grounded_y,settling);
-        render_bonus_scene(renderer,rom,world,event,displayed,loading,view,video_tick,spares,state.show_hud,tally?&*tally:nullptr);
+        render_bonus_scene(renderer,rom,world,event,displayed,loading,view,video_tick,spares,race_hud_visible,tally?&*tally:nullptr,state.paused);
+        if(renderer.rain_spray_enabled())renderer.load_spray(spray,float(phase));
         renderer.render();
         if(tally && tally->finished())return BonusFinish{event.collected_reward(),
             event.stayed_parked()?CourseMapEntry::bonus_parked:CourseMapEntry::bonus_moving,std::move(audio)};

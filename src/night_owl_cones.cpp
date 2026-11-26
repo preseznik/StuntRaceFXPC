@@ -100,7 +100,7 @@ void MovableCourseProps::cpu_step(StreamingCourse& course,const CollisionStreamS
     }
 }
 void MovableCourseProps::integrate(std::span<const CollisionShape> shapes,std::span<const std::uint32_t> order,
-                              const std::array<Vehicle,4>& cars) {
+                              std::span<const Vehicle> cars) {
     if(props_.empty())return;
     // Cache every candidate position/velocity before moving any body, as in
     // the original broadphase. A prop may itself be another prop's target.

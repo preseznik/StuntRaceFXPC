@@ -21,7 +21,7 @@ struct CourseMapButtons { bool start{}, accept{}, left{}, right{}; };
 // proportional mode also supplies the native vehicle's steering target.
 class Gamepad {
 public:
-    explicit Gamepad(const std::filesystem::path& config={});
+    explicit Gamepad(const std::filesystem::path& config={},std::optional<unsigned> player={});
     ~Gamepad();
     Gamepad(const Gamepad&)=delete;
     Gamepad& operator=(const Gamepad&)=delete;
