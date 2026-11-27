@@ -1,3 +1,4 @@
+#include "srf/custom_content.hpp"
 #include "srf/local_race.hpp"
 #include <algorithm>
 
@@ -12,10 +13,11 @@ RacePosition position(const VehicleState& b){
 }
 std::array<std::uint16_t,3> bounds(const VehicleState& b){return {b.word(12),b.word(14),b.word(16)};}
 }
-LocalRace::LocalRace(const Rom& rom,LocalCourse course,PlayerCar first,PlayerCar second,bool cpu,std::span<const PlayerCar> extra)
-    :scene_(supports_lan_course(course.index)?extract_course_scene(rom,static_cast<CourseId>(course.index)):read_local_scene(rom,course.index)),route_(extract_route(scene_)),shapes_(extract_collision(rom,scene_)),
-     opponents_(extract_opponent_tuning(rom)),count_(course.index==practice_course.index?1:2+unsigned(extra.size())),cpu_(cpu && count_==2),lan_(supports_lan_course(course.index)) {
+LocalRace::LocalRace(const Rom& rom,LocalCourse course,PlayerCar first,PlayerCar second,bool cpu,std::span<const PlayerCar> extra,DrivingPhysics physics)
+    :scene_(supports_lan_course(course.index)?extract_course_scene(rom,static_cast<CourseId>(course.index)):read_local_scene(rom,course.index)),route_(extract_route(scene_)),shapes_(extract_collision(rom,scene_,physics==DrivingPhysics::enhanced?&walls_:nullptr)),
+     opponents_(extract_opponent_tuning(rom)),count_(course.index==practice_course.index?1:2+unsigned(extra.size())),cpu_(cpu && count_==2),lan_(supports_lan_course(course.index)),physics_(physics) {
     if(count_>max_lan_drivers || (!lan_ && !extra.empty()))throw std::invalid_argument("Invalid local grid size");
+    if(physics==DrivingPhysics::enhanced)add_visible_course_walls(walls_,rom,scene_);
     grid_.resize(count_);
     ravine_=course.index==static_cast<unsigned>(CourseId::big_ravine);
     if(course.index==static_cast<unsigned>(CourseId::kings_forest) || course.index==static_cast<unsigned>(CourseId::lake_side) || ravine_){
@@ -75,16 +77,20 @@ LocalRace::LocalRace(const Rom& rom,LocalCourse course,PlayerCar first,PlayerCar
             spawn={object->position,object->orientation};
             spawn.position.y=route_[0].position[1];
         }
-        const unsigned type=static_cast<unsigned>(count_==1?PlayerCar::four_wd:i>=2?extra[i-2]:i?second:first);
+        const auto car=count_==1?PlayerCar::four_wd:i>=2?extra[i-2]:i?second:first;
+        const unsigned type=static_cast<unsigned>(chassis(car));
         const bool ai=i && cpu_;
         const auto definition=rom.u16(Rom::lorom_offset(ai?0x03b704:0x03b6f1)+2*type);
         const RacePosition start{std::int16_t(spawn.position.x),std::int16_t(spawn.position.y-(ai?480:160)),std::int16_t(spawn.position.z)};
         const auto color=rom.bytes()[Rom::lorom_offset(0x03b7b1)+type]&3;
         grid_[i]=create_vehicle(rom.bytes(),definition,start,spawn.orientation<<8,ai?4:1,color,scene_.surface_flags);
+        grid_[i].custom_shell=car==PlayerCar::cargo?cargo_shell:car==PlayerCar::kestrel?kestrel_shell:0;
         auto& b=grid_[i].body;
         if(ai){b.word(0x64)|=8;b.word(0x40)|=0x0200;}
         else b.word(0x1c)|=8;
         tuning_[i]=extract_vehicle_tuning(rom.bytes(),b.word(0x6e));
+        if(grid_[i].custom_shell==kestrel_shell)tune_kestrel(tuning_[i]);
+        if(grid_[i].custom_shell==cargo_shell)tune_cargo(tuning_[i]);
         wheels_[i]=extract_wheel_contact_tuning(rom,tuning_[i].contact_parameters);
     }
     if(course.index==static_cast<unsigned>(CourseId::sea_breeze))spray_.emplace(rom,grid_);
@@ -244,9 +250,12 @@ void LocalRace::step(const std::array<std::uint16_t,max_lan_drivers>& buttons,co
     if(spray_)spray_->step(cars_);
     if(props_)props_->integrate(shapes_,stream_.active_command_offsets,cars_);
     std::array<VehicleState*,max_lan_drivers> participants{};
+    std::array<RacePosition,max_lan_drivers> previous{};
     std::array<std::array<bool,max_lan_drivers>,max_lan_drivers> touches{};
     for(unsigned i=0;i<count_;++i){
         participants[i]=&cars_[i].body;
+        previous[i]=position(cars_[i].body);
+        if(physics_==DrivingPhysics::enhanced)continue;
         for(unsigned j=0;j<i;++j){
             const auto& a=cars_[j].body;const auto& b=cars_[i].body;
             touches[i][j]=touches[j][i]=collision_bounds_overlap(position(a),bounds(a),position(b),bounds(b)) && body_pair_overlap_filter(a,b);
@@ -269,6 +278,11 @@ void LocalRace::step(const std::array<std::uint16_t,max_lan_drivers>& buttons,co
         auto& contacts=candidates_[i];
         refresh_vehicle_contact_candidates(car,shapes_,contacts);
         VehicleStepEnvironment env{};
+        env.physics=physics_;
+        env.drift_held=!computer_[i] && (buttons[i]&drift_button);
+        env.walls=walls_;
+        env.course_shapes=shapes_;
+        env.kasumi_walls=scene_.authored==CourseId::kasumi_loop;
         env.route=route_;env.racers=std::span(participants).first(count_);env.opponent_index=i;
         env.player_rank=1;env.wheel_candidate_lists=&contacts;env.steering_q15=steering[i];
         std::vector<BodyContactCandidate> prop_contacts;
@@ -304,8 +318,10 @@ void LocalRace::step(const std::array<std::uint16_t,max_lan_drivers>& buttons,co
         }
         body.word(0x1c)&=std::uint16_t(~4u);
         finished[i]=body.word(0x7a)>=3;
-        failed[i]=race_failure(body.word(0x40))!=RaceFailure::none;
     }
+    if(physics_==DrivingPhysics::enhanced && count_>1)
+        resolve_racer_contacts(cars_,previous,tuning_,walls_,shapes_);
+    for(unsigned i=0;i<count_;++i)failed[i]=race_failure(cars_[i].body.word(0x40))!=RaceFailure::none;
     if(!streamed_course_.objects.empty())finish_collision_stream(streamed_course_,stream_);
     if(count_==1){
         if(failed[0])result_=2;

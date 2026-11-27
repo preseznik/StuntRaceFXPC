@@ -158,9 +158,9 @@ void race_finish(const srf::Rom& rom,const std::filesystem::path& output) {
         if(!output.empty())renderer.screenshot(output/name);
     }
     srf::Championship championship(srf::SpeedClass::novice,car,"AAA");
-    auto first=art.draw(championship,result,laps,{},0,dash);
+    auto first=art.draw(&championship,result,laps,{},0,dash,{});
     const std::vector<std::uint32_t> initial(first.begin(),first.end());
-    auto tallied=art.draw(championship,result,laps,{},90,dash);
+    auto tallied=art.draw(&championship,result,laps,{},90,dash,{});
     check_frame(!std::equal(initial.begin(),initial.end(),tallied.begin()),"Lap tally never changed");
     renderer.render_course_map(tallied);
     if(!output.empty())renderer.screenshot(output/"lap-total.png");

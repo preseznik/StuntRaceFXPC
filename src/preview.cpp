@@ -2,6 +2,7 @@
 #include "srf/rom.hpp"
 #include "srf/mesh.hpp"
 #include "srf/world.hpp"
+#include "srf/custom_content.hpp"
 #include "srf/native_race.hpp"
 #include "srf/audio_device.hpp"
 #include "srf/gamepad.hpp"
@@ -58,7 +59,7 @@ std::vector<std::uint8_t> read_file(const std::filesystem::path& path) {
     if (!stream.read(reinterpret_cast<char*>(bytes.data()), length)) throw std::runtime_error("Incomplete package read");
     return bytes;
 }
-enum class SurfaceFinish : std::uint32_t { none, paint, rubber, glass, steel_grating, foliage, barrier_paint, cloud_bank };
+enum class SurfaceFinish : std::uint32_t { none, paint, rubber, glass, steel_grating, foliage, barrier_paint, cloud_bank, lamp_lens };
 struct GpuVertex {
     float x,y,z,r,g,b,u=0,v=0,texture=0,painter_depth=0;
     std::array<float,4> road_origin_bias{};
@@ -144,6 +145,8 @@ struct BackdropConstants {
     float panorama_fog=-1; // negative for courses without a daylight panorama
     std::array<float,3> panorama_fog_color{1,1,1};
     unsigned harbor_windows{};
+    std::array<std::array<float,4>,8> city_lamps{};
+    std::array<float,4> city_light{};
 };
 struct Controls {
     std::size_t model=2, frame=0;
@@ -297,15 +300,16 @@ struct RaceGraphics {
     RaceWeather weather{};
     bool ray_shadows=false,ray_reflections=false,indirect_light=false,material_roughness=false,clear_coat=false,high_detail_road=false,high_detail_scenery=false;
     unsigned shadow_rays=4;
-    bool wet_tire_spray=false,volumetric_lighting=false;
+    bool wet_tire_spray=false,volumetric_lighting=false,drift_effects=false;
 };
 
+class DriftTrails;
 class Renderer {
     HWND output_window{};
     DesktopFrameLimit frame_limit;
     RaceCamera rendered_camera() const {return grid_sweep?RaceCamera::chase:race_camera.view;}
     const bool enhanced_scene,n64_mode;
-    bool stunt_style,blue_lake_style,aqua_style,sunset_style,night_style,cruise_style,forest_style,sea_style,white_land_style,lake_style,ravine_style,sky_ramp_style,harbor_style;
+    bool stunt_style,blue_lake_style,aqua_style,sunset_style,night_style,cruise_style,forest_style,mesa_style,city_style,sea_style,white_land_style,lake_style,ravine_style,sky_ramp_style,harbor_style;
     const unsigned start_hour;
     static std::array<float,4> sun_at(float hour) {
         const float angle=(hour-6.f)*3.14159265f/12.f;
@@ -407,6 +411,9 @@ class Renderer {
     ComPtr<ID3D11PixelShader> spray_shader;
     ComPtr<ID3D11Buffer> spray_vertices;
     UINT spray_count=0;
+    ComPtr<ID3D11Buffer> drift_vertices;
+    ComPtr<ID3D11PixelShader> drift_shader;
+    UINT drift_count=0;
     ComPtr<ID3D11BlendState> depth_only;
     ComPtr<ID3D11ShaderResourceView> texture_view, dusk_texture_view, palette_indices_view;
     srf::generated::CoursePackage course_colors = srf::generated::course_packages.front();
@@ -459,7 +466,7 @@ class Renderer {
         check(device->CreateBuffer(&desc,&initial,buffer.ReleaseAndGetAddressOf()),"Geometry buffer");
     }
     void upload(const std::vector<GpuVertex>& triangles,const std::vector<GpuVertex>& lines={},UINT surface_count=UINT_MAX) {
-        spray_count=0;
+        spray_count=drift_count=0;
         std::vector<GpuVertex> data=triangles; data.insert(data.end(),lines.begin(),lines.end());
         upload_vertices(data,vertices);
         vertex_count=static_cast<UINT>(triangles.size()); line_count=static_cast<UINT>(lines.size());
@@ -495,6 +502,8 @@ public:
         night_style=enhanced_scene && (course==srf::CourseId::night_owl || course==srf::CourseId::night_cruise || course==srf::CourseId::harbor_city);
         cruise_style=enhanced_scene && course==srf::CourseId::night_cruise;
         forest_style=enhanced_scene && course==srf::CourseId::kings_forest;
+        city_style=enhanced_scene && course==srf::kasumi_loop.id;
+        mesa_style=enhanced_scene && course==srf::CourseId::ember_mesa;
         sea_style=enhanced_scene && course==srf::CourseId::sea_breeze;
         white_land_style=enhanced_scene && course==srf::CourseId::white_land;
         lake_style=enhanced_scene && course==srf::CourseId::lake_side;
@@ -560,7 +569,7 @@ R"(
 cbuffer View : register(b0) { float cy,sy,cp,sp,aspect,zoom,distance,road_pass; float3 target; float eye_enabled;
     float4 eye_offset,eye_right,eye_up,eye_forward,projection,shadow_origin,shadow_axis,sun;
     float isometric,cutaway; float2 view_padding; float4 car_centers[4],probe_step; };
-cbuffer Environment : register(b1) { float4 crop; uint layer,blank,fixed_color,math_layers; uint gradient_y,sky_color,texture_weight; float rows_per_pixel; uint4 row_subtract[32]; uint indexed_textures,add_fixed; float aqua_meters,aqua_plane_y; uint sunset_valley; float sunset_dusk; float night_lighting; float panorama_fog; float4 panorama_fog_color; };
+cbuffer Environment : register(b1) { float4 crop; uint layer,blank,fixed_color,math_layers; uint gradient_y,sky_color,texture_weight; float rows_per_pixel; uint4 row_subtract[32]; uint indexed_textures,add_fixed; float aqua_meters,aqua_plane_y; uint sunset_valley; float sunset_dusk; float night_lighting; float panorama_fog; float4 panorama_fog_color; float4 city_lamps[8]; float4 city_light; };
 Texture2DArray<float4> tiles:register(t0);
 #if ROADSIDE_SCENERY
 Texture2D<float4> filtered_leaves:register(t15);
@@ -647,9 +656,7 @@ struct Pixel { float4 position:SV_POSITION; float3 color:COLOR; float3 uv:TEXCOO
 #ifdef REMASTERED_LIGHT
     float3 world_pos:TEXCOORD4;
     float depth_m:TEXCOORD5;
-#if MATERIAL_ROUGHNESS || CAR_CLEAR_COAT || ROAD_DETAIL || ROADSIDE_SCENERY
     nointerpolation uint finish:TEXCOORD6;
-#endif
 #endif
 #ifdef N64_MODE
     float3 view_pos:TEXCOORD4;
@@ -685,9 +692,7 @@ Pixel vertex_main(Vertex v) {
 #ifdef REMASTERED_LIGHT
     if(isometric) o.position=float4(p.x*zoom/(aspect*distance),p.y*zoom/distance,1-p.z/4,1);
     o.world_pos=v.position;
-#if MATERIAL_ROUGHNESS || CAR_CLEAR_COAT || ROAD_DETAIL || ROADSIDE_SCENERY
     o.finish=v.finish;
-#endif
     o.depth_m=p.z*sun.w;
     o.shadow=car_shadow_position(v.position).xyz;
 #endif
@@ -781,6 +786,20 @@ float4 tire_spray_pixel(Pixel p):SV_TARGET {
     return float4(mist*alpha,alpha);
 }
 #endif
+float4 drift_pixel(Pixel p):SV_TARGET {
+    if(p.uv.z>2.5)return float4(p.color,1); // Emissive tire sparks.
+    float2 uv=p.uv.xy;
+    float alpha=p.color.r;
+    if(p.uv.z>1.5)clip(min(p.color.g,p.color.b));
+    if(p.uv.z<.5 || p.uv.z>1.5) {
+        alpha*=p.uv.z>1.5 ? smoothstep(0,.32,min(uv.x,uv.y)) : 1-smoothstep(.68,1,abs(uv.x));
+        return float4(float3(.065,.063,.06)*alpha,alpha);
+    }
+    float seed=p.color.g;
+    float billow=.09*sin(uv.x*5+seed)*sin(uv.y*4-seed+p.color.b);
+    alpha*=1-smoothstep(.1,1,length(uv)+billow);
+    return float4(float3(.72,.71,.69)*alpha,alpha);
+}
 float4 pixel_main(Pixel p):SV_TARGET {
 #ifdef N64_MODE
     // A soft chassis shadow on the road also shades painted lines and chequers.
@@ -824,6 +843,18 @@ float4 pixel_main(Pixel p):SV_TARGET {
         direct*=.38;
     }
     float3 lighting=ambient*(.83+.17*saturate(normal.y))+direct*saturate(dot(normal,sun.xyz))*.63;
+    if(city_light.x>0) {
+        if(p.finish==8)lighting+=city_light.x*float3(4.3,3.3,2.2);
+        [unroll] for(int i=0;i<8;++i) {
+            float3 delta=(city_lamps[i].xyz-p.world_pos)*sun.w;
+            float dsq=max(1,dot(delta,delta));
+            float fall=saturate(1-dsq/(30*30));
+            float3 dir=delta*rsqrt(dsq);
+            float down=smoothstep(.10,.52,dir.y);
+            lighting+=float3(2.5,1.85,1.12)*city_lamps[i].w*down*fall*fall*
+                      (.15+.85*saturate(dot(normal,dir)));
+        }
+    }
     if(night_lighting>=0) {
         // The 4WD headlights stay on the road as the player turns or changes camera.
         float3 offset=(p.world_pos-shadow_origin.xyz)*sun.w;
@@ -1324,6 +1355,13 @@ float4 rain_pixel(Pixel p):SV_TARGET {
             ComPtr<ID3DBlob> code;
             check(D3DCompile(shader,sizeof(shader),nullptr,pixel_macros,nullptr,"tire_spray_pixel","ps_5_0",0,0,&code,&errors),"Tire spray shader");
             check(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&spray_shader),"Tire spray pixel shader");
+        }
+        if(graphics.drift_effects) {
+            ComPtr<ID3DBlob> code;
+            check(D3DCompile(shader,sizeof(shader),nullptr,pixel_macros,nullptr,"drift_pixel","ps_5_0",0,0,&code,&errors),"Drift shader");
+            check(device->CreatePixelShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&drift_shader),"Drift pixel shader");
+        }
+        if(graphics.wet_tire_spray || graphics.drift_effects) {
             depth_desc.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
             check(device->CreateDepthStencilState(&depth_desc,&spray_depth),"Tire spray depth test");
         }
@@ -1651,13 +1689,15 @@ float4 main(float4 position : SV_Position) : SV_Target {
     void set_race_phase(float phase){weather.seconds=phase/14.f;}
     void load_race_world(const srf::World& world,std::span<const RenderVehicle> vehicles,const srf::Rom& rom,
                          const srf::NativeRace& race,const srf::CourseScenery& scenery,float phase_fraction=0,
-                         const WetTireSpray* spray=nullptr) {
+                         const WetTireSpray* spray=nullptr,const DriftTrails* drift=nullptr) {
         set_race_phase(float(race.phase())+phase_fraction);
         ravine_wet=ravine_style && (race.racers()[race.player_index()].body.word(0x8a)&1);
         load_world(world,0,vehicles,&rom,scenery.poses(),race.rock_poses(),race.cone_poses(),
                    race.bridge_poses(),scenery.sprites(),&race);
         if(spray)load_spray(*spray,float(race.phase())+phase_fraction);
+        if(drift)load_drift(*drift,float(race.phase())+phase_fraction);
     }
+    void load_drift(const DriftTrails& trails,float phase);
     bool rain_spray_enabled() const {return spray_shader && weather.rain>0;}
     void load_spray(const WetTireSpray& spray,float phase) {
         std::vector<GpuVertex> mist;
@@ -1739,7 +1779,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
             // Harbor's two water crossings bottom out at Y=-160.
             else if(harbor_style)n64::level_terrain(landscape,-152,-10,normalize);
             else if(sea_style)n64::level_terrain(landscape,8,-10,normalize);
-            else if(!stunt_style && !aqua_style && !sunset_style && !night_style && !ravine_style && !sky_ramp_style)n64::coastal_terrain(landscape,world,models,normalize,edges,foliage_layer);
+            else if(!models.contains(srf::mesa_land) && !models.contains(srf::city_land) && !stunt_style && !aqua_style && !sunset_style && !night_style && !ravine_style && !sky_ramp_style)n64::coastal_terrain(landscape,world,models,normalize,edges,foliage_layer);
         }
         const auto draw_model=[&](const srf::WorldModel& model,const auto& transform,std::uint8_t opcode=0,std::int16_t descriptor_bias=0,float painter_depth=0,bool static_model=false,
                                   std::optional<std::size_t> animation_frame=std::nullopt, unsigned sign_phase=0, bool open_cockpit=false,std::span<const float> lane_offsets={}) {
@@ -1747,8 +1787,14 @@ float4 main(float4 position : SV_Position) : SV_Target {
             const auto& pose=model.frames[pose_index];
             const auto key=std::pair<unsigned,std::size_t>{model.descriptor_address,pose_index};
             auto offsets=surface_offsets.find(key);
-            if(offsets==surface_offsets.end())offsets=surface_offsets.emplace(key,
-                srf::coplanar_surface_offsets(model,pose_index,textured_materials)).first;
+            if(offsets==surface_offsets.end()) {
+                // Authored courses use edge-to-edge tiles. The legacy decal heuristic uses
+                // projected bounding boxes, which overlap on neighbouring bends.
+                const bool tiled=model.descriptor_address==srf::mesa_land || model.descriptor_address==srf::mesa_road ||
+                                 model.descriptor_address==srf::city_land || model.descriptor_address==srf::city_road;
+                offsets=surface_offsets.emplace(key,tiled?std::vector<srf::SurfaceOffset>(model.primitives.size()):
+                    srf::coplanar_surface_offsets(model,pose_index,textured_materials)).first;
+            }
             auto backs=barrier_backs.find(key);
             if(static_model && backs==barrier_backs.end())backs=barrier_backs.emplace(key,
                 srf::missing_barrier_backfaces(model,pose_index)).first;
@@ -1853,6 +1899,18 @@ float4 main(float4 position : SV_Position) : SV_Target {
                     const auto color=world_palette[palette_index];
                     r=float(color&31)/31; g=float((color>>5)&31)/31; b=float((color>>10)&31)/31;
                 }
+                if(srf::authored_model(descriptor)) {
+                    constexpr std::array<std::array<float,3>,26> colors{{
+                        {},{}, {.09f,.12f,.14f}, {.96f,.88f,.65f}, {.04f,.67f,.65f},
+                        {.83f,.24f,.10f}, {.70f,.35f,.19f}, {.43f,.22f,.19f}, {.82f,.60f,.38f},
+                        {.96f,.65f,.12f}, {.29f,.44f,.79f}, {.62f,.23f,.43f}, {.52f,.30f,.20f}, {},
+                        {.32f,.42f,.51f},{.53f,.60f,.63f},{.16f,.23f,.30f},{.29f,.56f,.65f},
+                        {.99f,.79f,.48f},{.76f,.78f,.73f},{.09f,.39f,.30f},{.68f,.39f,.28f},
+                        {.68f,.78f,.82f},{.16f,.26f,.37f},{1.f,.09f,.045f},{1.f,.81f,.49f}}};
+                    const auto tint=material==13?std::array{.10f,.24f,.31f}:material==0x2a?
+                        std::array{.30f,.31f,.32f}:colors.at(material);
+                    r=tint[0]*intensity;g=tint[1]*intensity;b=tint[2]*intensity;palette_index=-1;
+                }
                 const bool course_sign=material==0xc5 && sign_phase!=0;
                 if(ravine_style && high_detail_scenery && static_model && !landscape_buffer &&
                    opcode==2 && material==0x5a && face.indices.size()==3 &&
@@ -1861,7 +1919,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
                                       pose.at(face.indices[2]),{r,g,b},placed);
                 }
                 const auto texture=texture_locations.find(course_sign ? std::pair{0x9ba3u,sign_phase} : std::pair{0x8f91u,material});
-                const bool textured=texture!=texture_locations.end() && face.indices.size()==4;
+                const bool textured=!srf::authored_model(descriptor) && texture!=texture_locations.end() && face.indices.size()==4;
                 const bool original_player=enhanced_scene && n64::original_player_shell(descriptor);
                 const bool windshield=(opponent_shell || original_player) && material==0x0d;
                 const bool side_glass=std::abs(int(std::int8_t(face.attributes[3])))>std::abs(int(std::int8_t(face.attributes[5])));
@@ -1925,6 +1983,11 @@ float4 main(float4 position : SV_Position) : SV_Target {
                     // lights, undertrays and trim retain their own materials.
                     if((opponent_shell || original_player) && (material==1 || material==6 || material==8 ||
                        material==0x0a || material==0xbc || material==0xbd || material==0xbf))out.finish=SurfaceFinish::paint;
+                    if(descriptor==srf::kestrel_shell || descriptor==srf::cargo_shell) {
+                        if(material==4 || material==3 || (descriptor==srf::cargo_shell && (material==19 || material==5)))out.finish=SurfaceFinish::paint;
+                        else if(material==13)out.finish=SurfaceFinish::glass;
+                    }
+                    if(descriptor==srf::city_land && material==25)out.finish=SurfaceFinish::lamp_lens;
                     out.painter_depth=support_depth;
                     if(support_depth!=0)out.road_origin_bias={road_origin[0],road_origin[1],road_origin[2],road_bias};
                     if((detailed_forest_deck && descriptor==0xfa0c) ||
@@ -1983,7 +2046,8 @@ float4 main(float4 position : SV_Position) : SV_Target {
                             out.finish=SurfaceFinish::steel_grating;
                     } else if(enhanced_scene && static_model && face.indices.size()>=3) {
                         // Easy Ride's alternating asphalt, concrete barriers and hillside greens.
-                        if(aqua_style ? n64::aqua_driving_surface(descriptor,opcode,material) : n64::asphalt_material(descriptor,material)) out.texture=-1;
+                        if(((descriptor==srf::mesa_road || descriptor==srf::city_road) && material==0x2a) ||
+                           (aqua_style ? n64::aqua_driving_surface(descriptor,opcode,material) : n64::asphalt_material(descriptor,material))) out.texture=-1;
                         if((sunset_style || night_style || forest_style || white_land_style || lake_style || ravine_style || sky_ramp_style) && n64::graded_road(opcode,material))out.texture=-21;
                         if(detailed_forest_deck)out.texture=-21; // fixed bridge approaches
                         // Stunt decks use course-specific dirt and ice colours. Keep their palette under the surface grain.
@@ -2005,6 +2069,11 @@ float4 main(float4 position : SV_Position) : SV_Target {
                         // This chicane already models its sloped curb faces, including the triangular ends.
                         if(course_road_detail && white_land_style && descriptor==0xf92c && (material==0x1e || material==0x32))
                             out.texture=-27;
+                        if(descriptor==srf::mesa_road && (material==2 || material==3 || material==5) && (roughness || trace_reflections))
+                            out.texture=-25; // painted asphalt shares the wet surface
+                        if(high_detail_scenery && (descriptor==srf::mesa_land || descriptor==srf::mesa_road) &&
+                           material>=6 && material<=8)
+                            out.texture=std::abs(int(std::int8_t(face.attributes[4])))>94?-42:-41;
                         if(barrier) out.texture=-2;
                         if(material>=0x55 && material<=0x59)out.texture=white_land_style?-23:-3;
                         if(material==0xa8 && !white_land_style)out.texture=-3;
@@ -2012,7 +2081,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
                         if(bank!=forest_banks.end() && (forest_cut_bank || (material>=0x55 && material<=0x58))) {
                             out.texture=-39;out.r=bank->second.at(index);
                         }
-                        // The truss carries two grassy banks bordering the lower road at X = ±960.
+                        // The truss carries two grassy banks bordering the lower road at X = Ă‚Â±960.
                         if(course_scenery_detail && truss && material==0x57) {
                             out.texture=-40;out.r=1;out.g=0;
                             out.b=std::clamp((std::abs(local.x)-960)/forest_roadside::verge_width,0.f,1.f);
@@ -2133,17 +2202,19 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 const float z=-std::sin(controls.yaw)*(point[0]-controls.target_x)+std::cos(controls.yaw)*(point[2]-controls.target_z);
                 const float camera_z=(std::sin(controls.pitch)*y+std::cos(controls.pitch)*z+controls.distance)*float(world_radius);
                 const float camera_y=float(world_center[1])-(controls.target_y-controls.distance*std::sin(controls.pitch))*float(world_radius);
-                const auto bias=rom->u16((instance.visual_descriptor&0x7fff)+5);
+                const auto bias=srf::authored_model(instance.visual_descriptor)?0:rom->u16((instance.visual_descriptor&0x7fff)+5);
                 signed_bias=std::int16_t(bias<32768?int(bias):int(bias)-65536);
                 painter_depth=srf::road_painter_depth(camera_z,float(instance.position.y)-camera_y,signed_bias,instance.opcode==0x0c)/float(world_radius);
             }
             if(found!=models.end()) {
                 // The moving road deck uses its collision frame and the same depth pass as its approaches.
                 auto bridge=std::find_if(bridges.begin(),bridges.end(),replaces_instance);
-                std::optional<std::size_t> deck_frame;
-                if(bridge!=bridges.end()) deck_frame=bridge->frame;
+                std::optional<std::size_t> instance_frame;
+                if(bridge!=bridges.end())instance_frame=bridge->frame;
+                else if(instance.visual_descriptor==srf::mesa_wheel)
+                    instance_frame=enhanced_scene && !n64_mode ? std::size_t(std::max(0.f,weather.seconds)*6) : 0;
                 if(course_shadow_depth || trace_course())
-                    caster_poses.emplace_back(instance.command_offset,deck_frame.value_or(frame)%found->second->frames.size());
+                    caster_poses.emplace_back(instance.command_offset,instance_frame.value_or(frame)%found->second->frames.size());
                 std::span<const float> lanes;
                 if(course_road_detail && instance.opcode==2 && !world.route_points.empty()) {
                     auto [it,inserted]=road_offsets.try_emplace(instance.command_offset);
@@ -2154,7 +2225,7 @@ float4 main(float4 position : SV_Position) : SV_Target {
                     lanes=it->second;
                 }
                 draw_model(*found->second,[&](const srf::Vertex& v){return srf::world_position(v,instance);},
-                           instance.opcode,signed_bias,painter_depth,true,deck_frame,instance.sign_phase,false,lanes);
+                           instance.opcode,signed_bias,painter_depth,true,instance_frame,instance.sign_phase,false,lanes);
             }
         }
         // Camera-facing sprites and moving racers follow the stationary course mesh.
@@ -2203,12 +2274,16 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 draw_model(*found->second,[&](const srf::Vertex& v){return srf::scenery_position(v,pose);},0,0,0,false,pose.frame);
             }
         };
-        // Stunt stars move above and behind ramps. Test their actual geometry
-        // against the deck before rebuilding the road-priority depth for cars.
-        draw_actors(geometric_actors);
-        // From the banked descent the road crosses in front of the lake creature.
-        // Depth-test lake scenery against the deck before applying racer priority.
-        if(lake_style)draw_actors(scenery);
+        // Every course actor shares the depth of the road, walls and moving decks.
+        // Only the vehicles below need the original road-priority pass.
+        for(const auto actors:{geometric_actors,cones,props,scenery,extra_actors,pickups,bonus})draw_actors(actors);
+        for(const auto sprites:{race ? race->spray_sprites() : water_sprites,
+                                race ? race->breakable_sprites() : std::span<const srf::ScenerySprite>{}}) {
+            for(const auto& sprite:sprites) {
+                const auto p=sprite.position;
+                draw_sprite({sprite.table,sprite.frame,{float(p.x),float(p.y),float(p.z)},float(sprite.diameter)},world_winding);
+            }
+        }
         const auto draw_shell=[&](const RenderVehicle& vehicle,bool open_cockpit=false) {
             const auto found=models.find(vehicle.descriptor);
             if(found==models.end()) throw std::runtime_error("Original vehicle visual descriptor missing from generated world");
@@ -2240,8 +2315,6 @@ float4 main(float4 position : SV_Position) : SV_Target {
         world_vertex_count=static_cast<UINT>(triangles.size());
         world_line_count=static_cast<UINT>(lines.size());
         vehicle_depth_pass=rom && !vehicles.empty();
-        if(!lake_style)draw_actors(scenery);
-        for(const auto actors:{extra_actors,cones,props,pickups,bonus})draw_actors(actors);
         for(const auto& vehicle:vehicles)if(vehicle.source_model || !enhanced_scene || (!vehicle.player && !rival_mesh(vehicle)))draw_shell(vehicle);
         // Wheel and eye sprites draw over the rebuilt actor depth. The trees
         // above belong to the world and occlude cars only at opaque texels.
@@ -2269,13 +2342,6 @@ float4 main(float4 position : SV_Position) : SV_Target {
                 if(vehicle.descriptor==n64::f_type_player_shell)draw_shell(vehicle,true);
                 n64::draw_car(triangles,vehicle,false,[this](const auto& p){return normalize_world(p);},true);
             }
-        for(const auto sprites:{race ? race->spray_sprites() : water_sprites,
-                                race ? race->breakable_sprites() : std::span<const srf::ScenerySprite>{}}) {
-            for(const auto& sprite:sprites) {
-                const auto p=sprite.position;
-                draw_sprite({sprite.table,sprite.frame,{float(p.x),float(p.y),float(p.z)},float(sprite.diameter)},vehicle_winding);
-            }
-        }
         for(const auto& vehicle:vehicles)if(vehicle.source_model || (!rival_mesh(vehicle) && (!enhanced_scene || !vehicle.player)))
             for(const auto& sprite:vehicle.sprites)draw_sprite(sprite,vehicle_winding);
         if(!landscape.empty()) {
@@ -2554,13 +2620,30 @@ private:
             context->PSSetSamplers(1,1,car_shadow_sampler.GetAddressOf());
         }
         BackdropConstants surroundings{};
+        if(city_style && !n64_mode && sun[1]<.14f) {
+            // Fade over twilight. Only nearby lamps need per-pixel evaluation;
+            // distant lenses still glow. Distance fading hides changes of slot.
+            const float dusk=std::clamp((.14f-sun[1])/.21f,0.f,1.f);
+            surroundings.city_light[0]=dusk;
+            std::array<float,8> distances;
+            distances.fill(1e20f);
+            for(auto bulb:srf::kasumi_lamps()) {
+                const auto p=normalize_world({float(bulb.x),float(bulb.y),float(bulb.z)});
+                const float meters=float(std::hypot(p[0]-controls.target_x,p[2]-controls.target_z)*world_radius/90.);
+                auto slot=std::max_element(distances.begin(),distances.end());
+                if(meters>=*slot || meters>=180)continue;
+                const auto index=slot-distances.begin();
+                *slot=meters;
+                surroundings.city_lamps[index]={p[0],p[1],p[2],dusk*std::clamp((180-meters)/70.f,0.f,1.f)};
+            }
+        }
         if(night_style) {
             const float blend=environment.palette_weight/31.f;
             surroundings.night_lighting=harbor_style ? 1.f-blend : cruise_style ? blend : 1.f;
             // Keep low beams on across the early bonus gates, then reach full strength at night.
             if(cruise_style && course_road_detail)surroundings.night_lighting=std::lerp(.30f,1.f,blend);
         }
-        if(stunt_style || forest_style || sea_style || white_land_style || lake_style || ravine_style || sky_ramp_style || harbor_style) {
+        if(city_style || stunt_style || forest_style || sea_style || white_land_style || lake_style || ravine_style || sky_ramp_style || harbor_style) {
             surroundings.panorama_fog=environment.fog_weight/32.f;
             const auto fog=environment.fog_rgb555;
             surroundings.panorama_fog_color={float(fog&31)/31,float((fog>>5)&31)/31,float((fog>>10)&31)/31};
@@ -2646,6 +2729,21 @@ private:
                 context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             }
         };
+        const auto draw_drift=[&] {
+            if(!drift_count)return;
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->IASetVertexBuffers(0,1,drift_vertices.GetAddressOf(),&stride,&offset);
+            context->PSSetShader(drift_shader.Get(),nullptr,0);
+            context->RSSetState(sprite_solid.Get());
+            context->OMSetDepthStencilState(spray_depth.Get(),0);
+            composite_overlay();
+            context->Draw(drift_count,0);
+            context->OMSetBlendState(nullptr,nullptr,UINT_MAX);
+            context->OMSetDepthStencilState(reverse_depth.Get(),0);
+            context->PSSetShader(ps.Get(),nullptr,0);
+            context->RSSetState(controls.wire?wire.Get():solid.Get());
+            context->IASetVertexBuffers(0,1,vertices.GetAddressOf(),&stride,&offset);
+        };
         if(vehicle_depth_pass && value.isometric) {
             // Clip scenery before drawing any racer, so all four keep solid
             // silhouettes and the track beneath them still depth-tests normally.
@@ -2665,6 +2763,7 @@ private:
             context->Draw(world_vertex_count-two_sided_world_start,two_sided_world_start);
         } else if(vehicle_depth_pass) {
             draw_world();
+            draw_drift();
             // Preserve world color and its geometric self-occlusion, then rebuild
             // the actor occluders with the original road priority. No color or
             // geometry moves, and actual wall/car depth testing stays enabled.
@@ -2682,6 +2781,7 @@ private:
             draw_landscape();
             context->Draw(surface_vertex_count-cloud_vertices,cloud_vertices);
         }
+        if(!vehicle_depth_pass || value.isometric)draw_drift();
         context->RSSetState(controls.wire?wire.Get():sprite_solid.Get());
         const UINT visible_start=surface_vertex_count+(rendered_camera()==RaceCamera::cockpit?car_shadow_vertices:0);
         if(vertex_count>visible_start)context->Draw(vertex_count-visible_start,visible_start);
@@ -2704,7 +2804,7 @@ private:
             float density=0;
             if(night_style && !cruise_style && !harbor_style)
                 density=weather.rain>0?.009f:weather.extinction>=.02f?.023f:0.f;
-            if(forest_style && sun[1]>.02f && weather.rain==0) {
+            if((forest_style || mesa_style) && sun[1]>.02f && weather.rain==0) {
                 const float fog=std::max(weather.extinction>=.02f?1.f:0.f,environment.fog_weight/15.f);
                 density=.007f*fog*std::clamp((.72f-sun[1])*3,0.f,1.f);
             }
@@ -2850,10 +2950,11 @@ float lerp_angle(unsigned before,unsigned after,float blend) {
     return (float(before)+float(delta)*blend)*(6.28318530718f/65536.f);
 }
 using RoadTriangle=std::array<std::array<double,3>,3>;
-struct RoadSample {float y,dx,dz;};
+struct RoadSample {float y,dx,dz;const RoadTriangle* triangle;float u,v;};
 std::optional<RoadSample> road_at(std::span<const RoadTriangle> road,float x,float z,float reference_y) {
     std::optional<RoadSample> nearest;
-    for(const auto& [a,b,c]:road) {
+    for(const auto& triangle:road) {
+        const auto& [a,b,c]=triangle;
         if(x<std::min({a[0],b[0],c[0]}) || x>std::max({a[0],b[0],c[0]}) ||
            z<std::min({a[2],b[2],c[2]}) || z>std::max({a[2],b[2],c[2]}))continue;
         const double ax=a[0]-c[0],az=a[2]-c[2],bx=b[0]-c[0],bz=b[2]-c[2];
@@ -2865,7 +2966,7 @@ std::optional<RoadSample> road_at(std::span<const RoadTriangle> road,float x,flo
         const float y=float(c[1]+u*ay+v*by);
         // The road beneath the bridge and the deck can cover the same X/Z.
         if(!nearest || std::abs(y-reference_y)<std::abs(nearest->y-reference_y))
-            nearest=RoadSample{y,float((ay*bz-by*az)/det),float((ax*by-bx*ay)/det)};
+            nearest=RoadSample{y,float((ay*bz-by*az)/det),float((ax*by-bx*ay)/det),&triangle,float(u),float(v)};
     }
     return nearest;
 }
@@ -2889,7 +2990,7 @@ RenderVehicle vehicle_pose(const srf::Rom& rom,const srf::Vehicle& before,const 
     const auto& a=before.body;
     const auto& b=after.body;
     const auto definition=0x48000+(b.word(0x66)&0x7fff);
-    out.descriptor=rom.u16(definition+(player?0:2));
+    out.descriptor=after.custom_shell?after.custom_shell:rom.u16(definition+(player?0:2));
     for(unsigned axis=0;axis<3;++axis) {
         const auto old=signed_word(a.word(0x1e + axis*2));
         const auto delta=signed_word(static_cast<std::uint16_t>(b.word(0x1e + axis*2)-a.word(0x1e + axis*2)));
@@ -2933,9 +3034,7 @@ RenderVehicle vehicle_pose(const srf::Rom& rom,const srf::Vehicle& before,const 
         if(wheel.word(0x46)&0x200) continue; // Original08:BA70 skips hidden wheel definitions.
         const auto data=0x48000+wheel.word(0x12);
         const auto diameter_addition=rom.u16(data+4);
-        const auto sprite_descriptor=rom.u16(data);
-        const auto sprite_base=std::size_t(sprite_descriptor&0x7fff);
-        const float diameter=float(srf::original_sprite_diameter(rom.u16(sprite_base+16),rom.bytes()[sprite_base+7],std::uint8_t(diameter_addition)));
+        const float diameter=float(after.tire_diameters[wheel_index]);
         RenderSprite sprite;
         sprite.wheel=true;
         sprite.diameter=diameter;
@@ -2993,7 +3092,7 @@ RenderVehicle vehicle_pose(const srf::Rom& rom,const srf::Vehicle& before,const 
     }
     // CPU08:DCB4..DD89 reads the original attachment list. The eye callback
     // rotates its signed-byte XYZ and doubles it (08:E7E7..E890).
-    if(!exterior_eyes)return out;
+    if(!exterior_eyes || after.custom_shell)return out;
     const unsigned attachment_count=rom.bytes()[definition+0x60];
     for(unsigned index=0;index<attachment_count;++index) {
         const auto entry=definition+0x61+index*5;
@@ -3029,6 +3128,8 @@ std::array<RenderVehicle,4> vehicle_poses(const srf::Rom& rom,
     return result;
 }
 struct PresentationRoad {
+    bool seat_rivals{}, seat_player{};
+    void seat_vehicles(std::span<RenderVehicle> cars,std::span<const RoadTriangle> surface) const;
     struct Deck {
         unsigned command;
         std::size_t first;
@@ -3048,6 +3149,8 @@ struct PresentationRoad {
 };
 bool rival_driving_surface(srf::CourseId course,const srf::WorldInstance& instance,unsigned material) {
     switch(course) {
+    case srf::CourseId::kasumi_loop:return instance.visual_descriptor==srf::city_road && (material==0x2a || material==3 || material==9);
+    case srf::CourseId::ember_mesa:return instance.visual_descriptor==srf::mesa_road && (material==2 || material==0x2a || material==3 || material==5);
     case srf::CourseId::big_ravine:
         if(instance.visual_descriptor==0xe368)return material==0xc9; // moving plank tops
         return n64::graded_road(instance.opcode,material);
@@ -3075,8 +3178,10 @@ bool rival_driving_surface(srf::CourseId course,const srf::WorldInstance& instan
 }
 PresentationRoad presentation_surfaces(const srf::World& world,srf::CourseId course,bool seat_rivals) {
     PresentationRoad road;
+    road.seat_player=srf::custom_course(course);
+    road.seat_rivals=seat_rivals || road.seat_player;
     const bool road_course=course==srf::CourseId::sky_ramp || course==srf::CourseId::harbor_city;
-    if(course!=srf::CourseId::lake_side && course!=srf::CourseId::big_ravine && !road_course && !seat_rivals)return road;
+    if(course!=srf::CourseId::lake_side && course!=srf::CourseId::big_ravine && !road_course && !road.seat_rivals)return road;
     for(const auto& instance:world.instances) {
         // Lake Side uses its banked descent. Big Ravine's two D54C hairpins
         // can put the eye behind the inner cliff while the car is on the road.
@@ -3094,7 +3199,7 @@ PresentationRoad presentation_surfaces(const srf::World& world,srf::CourseId cou
                                         std::vector<std::vector<RoadTriangle>>(model->frames.size())});
         for(const auto& face:model->primitives) {
             const auto material=face.attributes[2];
-            if(seat_rivals && !rival_driving_surface(course,instance,material))continue;
+            if(road.seat_rivals && !rival_driving_surface(course,instance,material))continue;
             if(!seat_rivals && course==srf::CourseId::lake_side && material!=44 && material!=45)continue;
             if(!seat_rivals && course==srf::CourseId::big_ravine && material!=0x5b && material!=0x5c)continue;
             if(course==srf::CourseId::sky_ramp && (material<43 || material>45))continue;
@@ -3112,12 +3217,15 @@ PresentationRoad presentation_surfaces(const srf::World& world,srf::CourseId cou
     return road;
 }
 
+#include "drift_trails.inc"
+
 // The simulated tire contact includes the original sprite's vertical overlap.
 // Nearby suspension can leave the road. Route-driven rivals use the actual
 // road height in place of the route markers' fixed 160-unit body offset.
-void seat_opponents(std::span<RenderVehicle> cars,std::span<const RoadTriangle> road) {
+void PresentationRoad::seat_vehicles(std::span<RenderVehicle> cars,std::span<const RoadTriangle> road) const {
+    if(!seat_rivals)return;
     for(auto& car:cars) {
-        if(car.player)continue;
+        if(car.player && !seat_player)continue;
         std::optional<float> lift;
         for(const auto& wheel:car.sprites)if(wheel.wheel) {
             const auto [x,y,z]=wheel.position;
@@ -3190,11 +3298,13 @@ void chase_camera(const Renderer& renderer,const RenderVehicle& vehicle,float ya
         controls.yaw+=race_camera.heading;
         if(race_camera.mounted()) {
             const bool cockpit=race_camera.view==RaceCamera::cockpit;
-            const bool coupe=vehicle.descriptor==n64::coupe_player_shell;
+            const bool coupe=vehicle.descriptor==n64::coupe_player_shell || vehicle.descriptor==srf::kestrel_shell;
             auto eye=cockpit ? (coupe?std::array{-12.f,-89.f,-41.f}:std::array{-18.f,-85.f,-23.f})
                                    : (coupe?std::array{0.f,-72.f,41.f}:std::array{0.f,-81.f,66.f});
             if(vehicle.descriptor==n64::f_type_player_shell)
                 eye=cockpit?std::array{0.f,-80.f,-2.f}:std::array{0.f,-63.f,65.f};
+            if(vehicle.descriptor==srf::cargo_shell)
+                eye=cockpit?std::array{-18.f,-101.f,38.f}:std::array{0.f,-90.f,88.f};
             auto mount=vehicle.position;
             for(unsigned axis=0;axis<3;++axis)for(unsigned local=0;local<3;++local)
                 mount[axis]+=eye[local]*vehicle.orientation[local*3+axis];
@@ -3267,6 +3377,7 @@ std::uint16_t keyboard_control(HWND window) {
     if(down('A')||down(VK_LEFT)) result|=1;
     if(down('D')||down(VK_RIGHT)) result|=2;
     if(down(VK_SPACE)) result|=0x400;
+    if(down(VK_SHIFT)) result|=srf::drift_button;
     if(down('X')) result|=0x20;
     return result;
 }
@@ -3281,7 +3392,7 @@ std::vector<RecordedInput> read_inputs(const std::filesystem::path& path) {
     std::vector<RecordedInput> result;
     while(std::getline(file,line)) {
         std::istringstream row(line);unsigned phase=0,buttons=0,ticks=0;char a=0,b=0;
-        if(!(row>>phase>>a>>buttons>>b>>ticks) || a!=',' || b!=',' || phase!=result.size() || buttons&~(requested?0x473u:0xfc73u) || ticks>255)
+        if(!(row>>phase>>a>>buttons>>b>>ticks) || a!=',' || b!=',' || phase!=result.size() || buttons&~(requested?(0x473u|srf::drift_button):0xfc73u) || ticks>255)
             throw std::runtime_error("Invalid input CSV row or nonsequential phase");
         row>>std::ws;if(!row.eof()) throw std::runtime_error("Trailing input CSV fields");
         result.push_back({static_cast<std::uint16_t>(buttons),static_cast<std::uint8_t>(ticks),requested});
@@ -3299,7 +3410,7 @@ std::wstring race_status(const srf::NativeRace& race,double simulation_hz,bool c
     const std::wstring signal=held_on_grid || race.countdown_active()?L"START LIGHTS  -  HOLD":
         race.time_over_pending()?L"TIME OVER":award?
         std::wstring(award->checkpoint?L"CHECKPOINT  +":L"LAP EXTEND  +")+std::to_wstring(award->seconds)+L" s":L"GO";
-    text<<L"  "<<std::wstring(name.begin(),name.end())<<L" — NATIVE RACE    "<<simulation_hz<<L" Hz prototype pace\r\n"
+    text<<L"  "<<std::wstring(name.begin(),name.end())<<L" Ă˘â‚¬â€ť NATIVE RACE    "<<simulation_hz<<L" Hz prototype pace\r\n"
         <<L"  Lap "<<std::min(3u,unsigned(body.word(0x7a))+1)<<L" / 3    Position "<<race.standings()[race.player_index()]<<L" / 4"
         <<L"    Time left "<<grid_seconds.value_or(race.remaining_seconds())<<L" s"
         <<L"    Time "<<race.elapsed_centiseconds()/6000<<L":"<<std::setfill(L'0')<<std::setw(2)<<(race.elapsed_centiseconds()/100)%60
@@ -3307,7 +3418,7 @@ std::wstring race_status(const srf::NativeRace& race,double simulation_hz,bool c
         <<L"\r\n  Speed (native) "<<signed_word(body.word(0x4a))<<L"    Boost "<<body.word(0x6a)
         <<L"    Health "<<std::max(0,512-int(body.word(0x82)))<<L" / 512"
         <<L"    "<<signal
-        <<L"    "<<(race.completion().finished?L"FINISHED — R TO RESTART":controls.paused?L"PAUSED":L"")
+        <<L"    "<<(race.completion().finished?L"FINISHED Ă˘â‚¬â€ť R TO RESTART":controls.paused?L"PAUSED":L"")
         <<L"\r\n  W / UP accelerate   S / DOWN or X brake/reverse   A/D steer   SPACE boost   "
         <<(championship?L"R retire":L"R restart")<<L"   P pause   H status   F11 fullscreen   ESC back/exit";
     if(race.failure()==srf::RaceFailure::wrecked) text<<L"\r\n  WRECKED - R TO RESTART";
@@ -3343,9 +3454,12 @@ int wmain(int argc,wchar_t** argv) {
     std::filesystem::path screenshot;
     try {
         std::filesystem::path assets,world_path,rom_path,trace_path,input_path,controller_path,progress_path;
+        bool custom_content=false;
+        bool practice=false;
+        auto physics=srf::DrivingPhysics::original;
         bool validate=false,restart_check=false,borderless=false,screenshot_no_hud=false,gpu_timing=false;
         std::vector<srf::PlayerCar> lan_grid;
-        int lan_slot=-1;bool lan_drop_in=false,lan_capture_handoff=false;
+        int lan_slot=-1,lan_physics_revision=0;bool lan_drop_in=false,lan_capture_handoff=false;
         auto other_car=srf::PlayerCar::four_wd;
         auto player_car=srf::PlayerCar::four_wd;
         StuntReplay stunt_replay;
@@ -3356,13 +3470,15 @@ int wmain(int argc,wchar_t** argv) {
         unsigned vr_refresh=0,vr_scale=100;
         for(int i=1;i<argc;++i) {
             const std::wstring arg=argv[i];
-            if(arg==L"--assets" && i+1<argc) assets=argv[++i];
+            if(arg==L"--custom-content")custom_content=true;
+            else if(arg==L"--assets" && i+1<argc) assets=argv[++i];
             else if(arg==L"--world" && i+1<argc) { world_path=argv[++i]; controls.world=true; controls.yaw=0; controls.pitch=-1.1f; }
             else if(arg==L"--screenshot" && i+1<argc) screenshot=argv[++i];
             else if(arg==L"--model" && i+1<argc) controls.model=std::stoul(argv[++i]);
             else if(arg==L"--descriptor" && i+1<argc) descriptor=std::stoul(argv[++i],nullptr,0);
             else if(arg==L"--lan-screenshot-at-join")lan_capture_handoff=true;
             else if(arg==L"--lan-drop-in")lan_drop_in=true;
+            else if(arg==L"--lan-physics-revision" && i+1<argc)lan_physics_revision=std::stoi(argv[++i]);
             else if(arg==L"--lan-host" || arg==L"--lan-guest")lan_slot=arg==L"--lan-host"?0:1;
             else if(arg==L"--lan-seat" && i+1<argc)lan_slot=std::stoi(argv[++i]);
             else if((arg==L"--peer-car" || arg==L"--grid-car") && i+1<argc){
@@ -3370,10 +3486,14 @@ int wmain(int argc,wchar_t** argv) {
                 if(value==L"4wd")other_car=srf::PlayerCar::four_wd;
                 else if(value==L"coupe")other_car=srf::PlayerCar::coupe;
                 else if(value==L"f-type")other_car=srf::PlayerCar::f_type;
+                else if(value==L"cargo")other_car=srf::PlayerCar::cargo;
+                else if(value==L"hilly" || value==L"kestrel")other_car=srf::PlayerCar::kestrel;
                 else throw std::invalid_argument("Unknown peer car");
                 if(arg==L"--grid-car")lan_grid.push_back(other_car);
             }
             else if(arg==L"--race") controls.race=true;
+            else if(arg==L"--practice") { practice=true; controls.race=true; }
+            else if(arg==L"--enhanced-physics")physics=srf::DrivingPhysics::enhanced;
             else if(arg==L"--n64" || arg==L"--remastered") {
                 const auto requested=arg==L"--n64"?RaceLook::n64:RaceLook::remastered;
                 if(look!=RaceLook::classic && look!=requested)throw std::runtime_error("Choose one race look.");
@@ -3446,6 +3566,8 @@ int wmain(int argc,wchar_t** argv) {
                 const std::wstring car=argv[++i];
                 if(car==L"4wd")player_car=srf::PlayerCar::four_wd;
                 else if(car==L"f-type")player_car=srf::PlayerCar::f_type;
+                else if(car==L"cargo")player_car=srf::PlayerCar::cargo;
+                else if(car==L"hilly" || car==L"kestrel")player_car=srf::PlayerCar::kestrel;
                 else if(car==L"coupe")player_car=srf::PlayerCar::coupe;
                 else throw std::runtime_error("Supported cars: 4wd, f-type, coupe");
             }
@@ -3486,7 +3608,7 @@ int wmain(int argc,wchar_t** argv) {
             else if(arg==L"--width" && i+1<argc) controls.width=std::stoul(argv[++i]);
             else if(arg==L"--height" && i+1<argc) controls.height=std::stoul(argv[++i]);
             else if(arg==L"--validate-assets") validate=true;
-            else throw std::runtime_error("Usage: srf_preview --assets <models.srfmesh> [--world <world.srfworld>] [--game | --race] [--remastered [--time-of-day 0..23] [--ray-traced-shadows [--shadow-rays 1|2|4]] [--ray-traced-reflections] [--ray-traced-indirect] [--material-roughness] [--car-clear-coat] [--high-detail-road] [--high-detail-scenery] [--wet-tire-spray] [--volumetric-lighting] [--msaa 0|2|4|8] [--weather preset] | --n64 [--n64-240p] [--classic-snes]] [--rom <original.sfc> --course easy-ride|aqua-tunnel|sunset-valley|night-owl|kings-forest|sea-breeze|white-land|night-cruise|lake-side|big-ravine|sky-ramp|harbor-city --car 4wd|coupe|f-type] [--borderless] [--validate-assets | --screenshot <new.png>] [--steps count --control native_word --trace new.jsonl] [--replay-input controls.csv] [--restart-check] [--simulation-hz 14] [--controller-config path] [--model index --descriptor address --yaw radians --pitch radians --zoom factor --width pixels --height pixels]");
+            else throw std::runtime_error("Usage: srf_preview --assets <models.srfmesh> [--world <world.srfworld>] [--game | --practice | --race] [--enhanced-physics] [--remastered [--time-of-day 0..23] [--ray-traced-shadows [--shadow-rays 1|2|4]] [--ray-traced-reflections] [--ray-traced-indirect] [--material-roughness] [--car-clear-coat] [--high-detail-road] [--high-detail-scenery] [--wet-tire-spray] [--volumetric-lighting] [--msaa 0|2|4|8] [--weather preset] | --n64 [--n64-240p] [--classic-snes]] [--rom <original.sfc> --course easy-ride|aqua-tunnel|sunset-valley|night-owl|kings-forest|sea-breeze|white-land|night-cruise|lake-side|big-ravine|sky-ramp|harbor-city --car 4wd|coupe|f-type] [--borderless] [--validate-assets | --screenshot <new.png>] [--steps count --control native_word --trace new.jsonl] [--replay-input controls.csv] [--restart-check] [--simulation-hz 14] [--controller-config path] [--model index --descriptor address --yaw radians --pitch radians --zoom factor --width pixels --height pixels]");
         }
         race_camera.enabled=look==RaceLook::remastered;
 
@@ -3494,6 +3616,13 @@ int wmain(int argc,wchar_t** argv) {
         if(camera_max_distance)race_camera.max_distance_m=*camera_max_distance;
         race_camera.view=vr?RaceCamera::bonnet:camera.value_or(RaceCamera::chase);
         if(vr)race_camera.look=false;
+        if(physics==srf::DrivingPhysics::enhanced && (!controls.race || launch_game))
+            throw std::invalid_argument("--enhanced-physics requires direct practice, Quick Race or LAN.");
+        if(lan_slot>=0 && physics==srf::DrivingPhysics::enhanced && lan_physics_revision!=129)
+            throw std::invalid_argument("Enhanced LAN physics requires a matching launcher and game build.");
+        if(practice && (launch_game || lan_slot>=0 || validate || !screenshot.empty() || steps || fixed_control ||
+           restart_check || !input_path.empty() || !trace_path.empty() || rom_path.empty() || world_path.empty() || look!=RaceLook::classic))
+            throw std::invalid_argument("--practice requires an interactive Classic launch with a world and ROM.");
         if(gpu_timing && (screenshot.empty() || !controls.race || launch_game || vr || look!=RaceLook::remastered))throw std::runtime_error("--gpu-timing requires an offscreen --race --remastered --screenshot.");
         if(volume_enabled && look!=RaceLook::remastered)throw std::runtime_error("Volumetric lighting requires --remastered.");
         if(wet_spray_enabled && look!=RaceLook::remastered)throw std::runtime_error("Wet tire spray requires --remastered.");
@@ -3526,14 +3655,17 @@ int wmain(int argc,wchar_t** argv) {
         if(assets.empty()) throw std::runtime_error("Select a generated mesh package with --assets");
         if(launch_game && (world_path.empty() || rom_path.empty() || descriptor || validate || steps || fixed_control || restart_check || (!screenshot.empty() && (!trace_path.empty() || !input_path.empty()))))
             throw std::runtime_error("Launch Game requires a world and ROM; bounded race captures require --race");
-        const auto package_root=course==srf::CourseId::easy_ride?assets.parent_path():assets.parent_path().parent_path();
+        if(!custom_content && (srf::custom_course(course) || srf::custom_car(player_car) ||
+           std::ranges::any_of(lan_grid,srf::custom_car) || srf::custom_car(other_car)))
+            throw std::invalid_argument("Enable Custom content for this course or vehicle.");
+        const auto package_root=srf::asset_course(course)==srf::CourseId::easy_ride?assets.parent_path():assets.parent_path().parent_path();
         if(lan_drop_in && lan_slot<1)throw std::invalid_argument("LAN catch-up requires a guest");
         if(lan_slot>=0 && (!controls.race || vr || launch_game || !srf::supports_lan_course(static_cast<unsigned>(course)) || rom_path.empty() || world_path.empty()))
             throw std::invalid_argument("LAN requires a supported desktop Quick Race course");
         const auto launch_controls=controls;
         if(stunt_replay.course && !launch_game)throw std::invalid_argument("--stunt-replay requires --game");
         stunt_replay.car=player_car;
-        const RaceGraphics graphics{look,n64_low_raster || classic_snes,time_of_day.value_or(12),msaa.value_or(0),weather.value_or(RaceWeather{}),ray_shadows_enabled,ray_reflections_enabled,indirect_enabled,roughness_enabled,coat_enabled,road_detail_enabled,scenery_detail_enabled,shadow_rays.value_or(4),wet_spray_enabled,volume_enabled};
+        const RaceGraphics graphics{look,n64_low_raster || classic_snes,time_of_day.value_or(12),msaa.value_or(0),weather.value_or(RaceWeather{}),ray_shadows_enabled,ray_reflections_enabled,indirect_enabled,roughness_enabled,coat_enabled,road_detail_enabled,scenery_detail_enabled,shadow_rays.value_or(4),wet_spray_enabled,volume_enabled,physics==srf::DrivingPhysics::enhanced};
         struct ComScope {HRESULT hr=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);~ComScope(){if(SUCCEEDED(hr))CoUninitialize();}} com;
         check(com.hr,"Game COM initialization");
         std::ofstream xr_log;
@@ -3543,6 +3675,11 @@ int wmain(int argc,wchar_t** argv) {
             SetProcessDPIAware();
             if(vr){xr_log.open(L"openxr-last-drive.log");xr_session.emplace(xr_log,vr_refresh,vr_scale);game_xr=&*xr_session;}
             host.emplace();host->open(borderless,graphics);
+            if(practice) {
+                play_local_race(*host,srf::Rom::load(rom_path),srf::practice_course,srf::PlayerCar::four_wd,
+                                srf::PlayerCar::four_wd,false,controller_path,physics,true);
+                return 0;
+            }
         }
         const auto present_result=[&](const srf::GameResultPage& page){return game_result(*host,page);};
         auto driving_camera=race_camera;
@@ -3595,16 +3732,17 @@ int wmain(int argc,wchar_t** argv) {
         if(game_closing)return 0;
         if(choose_quick){
             choose_quick=false;
-            if(!quick_board(*host,course,player_car)){
+            if(!quick_board(*host,course,player_car,custom_content)){
                 if(game_closing)return 0;
                 launch_game=true;cold_boot=false;
             }else{
-                const auto directory=course==srf::CourseId::easy_ride?package_root:package_root/std::string(srf::course_definition(course).slug);
+                const auto directory=srf::asset_course(course)==srf::CourseId::easy_ride?package_root:package_root/std::string(srf::course_definition(course).slug);
                 assets=directory/"models.srfmesh";world_path=directory/"world.srfworld";
                 controls=launch_controls;
             }
         }
         if(launch_game) {
+            physics=srf::DrivingPhysics::original;
             if(!championship) {
                 race_camera={};
                 const auto rom=srf::Rom::load(rom_path);
@@ -3646,19 +3784,19 @@ int wmain(int argc,wchar_t** argv) {
             }
             course=championship->course();
             player_car=selection.car;
-            const auto directory=course==srf::CourseId::easy_ride?package_root:package_root/std::string(srf::course_definition(course).slug);
+            const auto directory=srf::asset_course(course)==srf::CourseId::easy_ride?package_root:package_root/std::string(srf::course_definition(course).slug);
             assets=directory/"models.srfmesh";world_path=directory/"world.srfworld";
             controls=launch_controls;
             race_camera=driving_camera;
         }
-        const auto& course_package=srf::generated::course_packages[static_cast<unsigned>(course)];
+        const auto& course_package=srf::generated::course_packages[static_cast<unsigned>(srf::asset_course(course))];
         const auto& course_definition=srf::course_definition(course);
         const std::wstring course_name(course_definition.name.begin(),course_definition.name.end());
         const auto bytes=read_file(assets);
         if(srf::sha256(bytes)!=srf::generated::mesh_sha256) throw std::runtime_error("Mesh package does not match this locally compiled preview");
         const auto models=srf::decode_meshes(bytes);
         if(models.empty() || models.size()!=srf::generated::model_count) throw std::runtime_error("Mesh manifest mismatch");
-        const auto scene_bytes=read_file(assets.parent_path()/(std::string(course_definition.slug)+"-scene.json"));
+        const auto scene_bytes=read_file(assets.parent_path()/(std::string(srf::course_definition(srf::asset_course(course)).slug)+"-scene.json"));
         if(srf::sha256(scene_bytes)!=course_package.scene_sha256) throw std::runtime_error("Scene report does not match this locally compiled preview");
         srf::World world;
         std::vector<srf::WorldSprite> sprites, dusk_sprites;
@@ -3677,6 +3815,9 @@ int wmain(int argc,wchar_t** argv) {
                 dusk_sprites=srf::decode_world_sprites(dusk_bytes);
             }
             if(world.models.size()!=course_package.models || world.instances.size()!=course_package.instances) throw std::runtime_error("World manifest mismatch");
+            if(srf::custom_course(course) || srf::custom_car(player_car) ||
+               srf::custom_car(other_car) || std::ranges::any_of(lan_grid,srf::custom_car))
+                srf::add_custom_models(world,course);
             for(const auto& instance:world.instances) {
                 const auto model=std::find_if(world.models.begin(),world.models.end(),[&](const auto& m){return m.descriptor_address==instance.visual_descriptor;});
                 if(model!=world.models.end() && !model->primitives.empty()) { ++world_polygon_instances; world_primitives+=model->primitives.size(); }
@@ -3714,7 +3855,7 @@ int wmain(int argc,wchar_t** argv) {
             if(lan_grid.empty())lan_grid=lan_slot?std::vector{other_car,player_car}:std::vector{player_car,other_car};
             if(lan_grid.size()<2 || lan_grid.size()>srf::max_lan_drivers || unsigned(lan_slot)>=lan_grid.size())
                 throw std::invalid_argument("Invalid LAN seat or grid");
-            return play_lan_race(host?&*host:nullptr,renderer,rom,world,course,lan_slot,lan_grid,controller_path,screenshot,lan_drop_in,lan_capture_handoff);
+            return play_lan_race(host?&*host:nullptr,renderer,rom,world,course,lan_slot,lan_grid,controller_path,screenshot,lan_drop_in,lan_capture_handoff,physics);
         }
         std::unique_ptr<srf::Rom> race_rom;
         std::unique_ptr<srf::NativeRace> race;
@@ -3756,7 +3897,7 @@ int wmain(int argc,wchar_t** argv) {
             if(championship && championship->round()==1)slots=srf::GridOrder{4,3,2,1};
             race=std::make_unique<srf::NativeRace>(*race_rom,player_car,course,
                 championship?std::optional(championship->carry_seconds()):std::nullopt,
-                slots);
+                slots,championship?srf::DrivingPhysics::original:physics);
             scenery=std::make_unique<srf::CourseScenery>(*race_rom,course);
             environment=std::make_unique<srf::CourseEnvironment>(*race_rom,course);
             if(course==srf::CourseId::big_ravine)rain.emplace(*race_rom);
@@ -3798,6 +3939,8 @@ int wmain(int argc,wchar_t** argv) {
                 environment_video_ticks=target;
             }
         };
+        std::optional<DriftTrails> drift_trails;
+        if(graphics.drift_effects)drift_trails.emplace(world,course);
         std::optional<WetTireSpray> spray;
         if(graphics.wet_tire_spray && (graphics.weather.rain>0 || course==srf::CourseId::big_ravine))spray.emplace();
         const auto step_race=[&](std::uint16_t input,std::optional<std::int16_t> steering=std::nullopt,
@@ -3822,10 +3965,11 @@ int wmain(int argc,wchar_t** argv) {
             const bool raw_throttle=(input&0x10)!=0;
             srf::RaceAudioOutput input_events;
             const auto& player_before=race->racers()[race->player_index()].body;
+            const bool drift_held=map_wishes && (input&srf::drift_button);
             if(map_wishes)
                 input=srf::prepare_player_input(race_audio_state,player_before,input,race->countdown_active(),input_events);
             else input=srf::filter_player_boost(player_before,input);
-            previous=race->racers(); race->step(input,locked_grid_ticks?0:ticks,steering,halfway);
+            previous=race->racers(); race->step(input,locked_grid_ticks?0:ticks,steering,halfway,drift_held);
             if(race_camera.enabled)rival_travel.advance(previous,race->racers());
             if(host && race->completion().acknowledged_laps>previous_lap && previous_lap<lap_times.size()) {
                 const auto elapsed=race->elapsed_centiseconds();
@@ -3833,6 +3977,11 @@ int wmain(int argc,wchar_t** argv) {
                 last_lap_end=elapsed;
             }
             if(previous_phase!=race->phase()) {
+                if(drift_trails) {
+                    const auto phase=static_cast<unsigned>(race->phase());
+                    drift_trails->begin_phase(phase,race->bridge_poses());
+                    for(unsigned i=0;i<previous.size();++i)drift_trails->emit(phase,i,previous[i],race->racers()[i]);
+                }
                 if(spray) {
                     const auto phase=static_cast<unsigned>(race->phase());
                     spray->begin_phase(phase);
@@ -3943,7 +4092,7 @@ int wmain(int argc,wchar_t** argv) {
             controls=launch_controls;
         };
         if(vr && !launch_game) {
-            SetWindowTextW(window,(L"Stunt Race FX — "+course_name+L" VR").c_str());
+            SetWindowTextW(window,(L"Stunt Race FX Ă˘â‚¬â€ť "+course_name+L" VR").c_str());
             auto& renderer=*host->presenter;
             renderer.select_course(course);
             renderer.set_course_colors(course_package);renderer.load_textures(sprites,dusk_sprites);
@@ -3954,10 +4103,10 @@ int wmain(int argc,wchar_t** argv) {
             catch(const std::exception& e){xr_log<<"Audio: "<<e.what()<<std::endl;audio.reset();}
             const auto companion=CreateWindowW(L"STATIC",L"Race running in the headset.  R: restart    F2: recenter    Esc: course selection",
                 WS_CHILD|WS_VISIBLE,12,12,600,60,window,nullptr,GetModuleHandleW(nullptr),nullptr);
-            run_bonnet_drive(window,*xr_session,renderer,*race_rom,*race,*scenery,*environment,world,previous,road,rival_travel,look,native_vr_motion,spray?&*spray:nullptr,controller_path,
+            run_bonnet_drive(window,*xr_session,renderer,*race_rom,*race,*scenery,*environment,world,previous,road,rival_travel,look,native_vr_motion,spray?&*spray:nullptr,drift_trails?&*drift_trails:nullptr,controller_path,
                 *grid_art,grid_pixels,audio,step_race,[&]{
                     race->reset();previous=race->racers();countdown_clock=0;race_audio_state={};input_index=0;
-                    rival_travel={};if(spray)*spray=WetTireSpray{};
+                    rival_travel={};if(drift_trails)drift_trails->reset();if(spray)*spray=WetTireSpray{};
                     lap_times={};last_lap_end=0;finish_replay.clear();
                     scenery->reset();environment->reset();phase_video_ticks=environment_video_ticks=0;
                     if(audio){audio->restart();audio->update({},false,false,true,false);}
@@ -3984,11 +4133,11 @@ int wmain(int argc,wchar_t** argv) {
                 for(unsigned i=0;i<steps;++i) step_race(static_cast<std::uint16_t>(fixed_control));
                 const auto camera_road=road.sample(race->bridge_poses());
                 auto poses=vehicle_poses(*race_rom,previous,race->racers(),race->player_index(),1,true,race_camera.enabled?&rival_travel:nullptr,camera_road,look==RaceLook::n64);
-                if(race_camera.enabled)seat_opponents(poses,camera_road);
+                road.seat_vehicles(poses,camera_road);
                 const auto& b=race->racers()[race->player_index()].body;
                 chase_camera(renderer,poses[race->player_index()],lerp_angle(b.word(0x24),b.word(0x24),1),cliffs.empty()?camera_road:std::span<const RoadTriangle>(cliffs),course);
                 renderer.set_environment(environment->presentation());
-                renderer.load_race_world(world,poses,*race_rom,*race,*scenery,0,spray?&*spray:nullptr);
+                renderer.load_race_world(world,poses,*race_rom,*race,*scenery,0,spray?&*spray:nullptr,drift_trails?&*drift_trails:nullptr);
                 if(rain)renderer.set_rain(rain->pixels());
             }
             if(race && !screenshot_no_hud)update_driving_hud(race_hud_visible);
@@ -4017,7 +4166,7 @@ int wmain(int argc,wchar_t** argv) {
                     std::vector<srf::RainPixel> final_rain;
                     if(rain){final_rain.assign(rain->pixels().begin(),rain->pixels().end());rain->reset();}
                     race->reset();input_index=0;countdown_clock=0;previous=race->racers();race_audio_state={};
-                    rival_travel={};
+                    rival_travel={};if(drift_trails)drift_trails->reset();
                     scenery->reset();environment->reset();
                     phase_video_ticks=environment_video_ticks=0;
                     if(race->phase()!=0 || race->ended()) throw std::runtime_error("Native restart failed to reset race lifecycle");
@@ -4058,7 +4207,7 @@ int wmain(int argc,wchar_t** argv) {
             if(race) {
                 // The navigation harness reads this status through EnumChildWindows.
                 race_hud=CreateWindowExW(0,L"STATIC",L"",WS_CHILD,0,0,0,0,window,nullptr,GetModuleHandleW(nullptr),nullptr);
-                SetWindowTextW(window,(L"Stunt Race FX — "+course_name+(look==RaceLook::n64?L" (N64 mode)":look==RaceLook::remastered?L" Remastered":L"")).c_str());
+                SetWindowTextW(window,(L"Stunt Race FX Ă˘â‚¬â€ť "+course_name+(look==RaceLook::n64?L" (N64 mode)":look==RaceLook::remastered?L" Remastered":L"")).c_str());
                 controls.dirty=false;
                 try {
                     if(!audio) {
@@ -4079,6 +4228,7 @@ int wmain(int argc,wchar_t** argv) {
             LARGE_INTEGER frequency,last; QueryPerformanceFrequency(&frequency); QueryPerformanceCounter(&last);
             bool running=true;
             double accumulator=0;
+            srf::DriftInput drift;
             double grid_fraction=0;
             while(running && !game_closing && !controls.back) {
                 MSG message;
@@ -4092,12 +4242,12 @@ int wmain(int argc,wchar_t** argv) {
                     std::wostringstream title;
                     if(controls.world) {
                         renderer.load_world(world,controls.frame);
-                        title << L"Stunt Race FX — "<<course_name<<L" world research | Original flat colors / magenta: unresolved material | "
+                        title << L"Stunt Race FX Ă˘â‚¬â€ť "<<course_name<<L" world research | Original flat colors / magenta: unresolved material | "
                               << L"Drag: orbit  Right-drag/WASD/QE: move  Wheel: zoom  Tab: wire  F: pose  Home: reset";
                     } else {
                         const auto& model=models[controls.model];
                         controls.frame%=model.frames.size(); renderer.load(model,controls.frame);
-                        title << L"Stunt Race FX — native model research | " << controls.model+1 << L"/" << models.size()
+                        title << L"Stunt Race FX Ă˘â‚¬â€ť native model research | " << controls.model+1 << L"/" << models.size()
                               << L" offset 0x" << std::hex << model.rom_offset << std::dec << L" frame " << controls.frame
                               << L" | Arrows: model  F: frame  W: wire  Drag: rotate  Wheel: zoom  Space: spin | Materials/identity unverified";
                     }
@@ -4137,7 +4287,7 @@ int wmain(int argc,wchar_t** argv) {
                     if(controls.restart) {
                         race->reset();previous=race->racers();accumulator=0;countdown_clock=0;input_index=0;controls.restart=false;controls.paused=false;race_audio_state={};
                         lap_times={};last_lap_end=0;finish_replay.clear();
-                        rival_travel={};
+                        rival_travel={};if(drift_trails)drift_trails->reset();
                         scenery->reset();environment->reset();
                         if(rain){rain->reset();rain_changed=true;}
                         phase_video_ticks=environment_video_ticks=0;
@@ -4150,12 +4300,13 @@ int wmain(int argc,wchar_t** argv) {
                             if(!failure.empty()) {audio_failure=failure;audio.reset();}
                         } catch(const std::exception& error) {audio_failure=error.what();audio.reset();}
                     }
+                    const auto input=srf::combine_player_input(keyboard_control(window),pad);
+                    drift.sample(input.requested,focused && !controls.paused && !race->countdown_active());
                     if(focused && !controls.paused) {
-                        const auto input=srf::combine_player_input(keyboard_control(window),pad);
                         const auto advance_race=[&](double seconds) {
                             accumulator+=seconds;
                             while(accumulator>=1/simulation_hz) {
-                                step_race(input.requested,input.steering_q15);
+                                step_race(drift.consume(input.requested),input.steering_q15);
                                 accumulator-=1/simulation_hz;
                             }
                         };
@@ -4195,7 +4346,7 @@ int wmain(int argc,wchar_t** argv) {
                     const float blend=controls.paused?1.f:float(accumulator*simulation_hz);
                     const auto camera_road=road.sample(race->bridge_poses());
                     auto poses=vehicle_poses(*race_rom,previous,race->racers(),race->player_index(),blend,!game_xr,race_camera.enabled?&rival_travel:nullptr,camera_road,look==RaceLook::n64);
-                    if(race_camera.enabled)seat_opponents(poses,camera_road);
+                    road.seat_vehicles(poses,camera_road);
                     const auto& a=previous[race->player_index()].body;
                     const auto& b=race->racers()[race->player_index()].body;
                     chase_camera(renderer,poses[race->player_index()],lerp_angle(a.word(0x24),b.word(0x24),blend),cliffs.empty()?camera_road:std::span<const RoadTriangle>(cliffs),course);
@@ -4210,7 +4361,7 @@ int wmain(int argc,wchar_t** argv) {
                             renderer.grid_sweep=true;
                             poses=vehicle_poses(*race_rom,previous,race->racers(),race->player_index(),blend,true,
                                 race_camera.enabled?&rival_travel:nullptr,camera_road,look==RaceLook::n64,view);
-                            if(race_camera.enabled)seat_opponents(poses,camera_road);
+                            road.seat_vehicles(poses,camera_road);
                         }
                         held_on_grid=!frame.driving;
                         grid_seconds=frame.clock_seconds;
@@ -4224,7 +4375,7 @@ int wmain(int argc,wchar_t** argv) {
                         if(!held_on_grid)bonnet_camera(renderer,poses[race->player_index()],lerp_angle(a.word(0x24),b.word(0x24),blend));
                     }
                     renderer.set_environment(environment->presentation());
-                    renderer.load_race_world(world,poses,*race_rom,*race,*scenery,race->ended()?0.f:blend-1.f,spray?&*spray:nullptr);
+                    renderer.load_race_world(world,poses,*race_rom,*race,*scenery,race->ended()?0.f:blend-1.f,spray?&*spray:nullptr,drift_trails?&*drift_trails:nullptr);
                     auto status=race_status(*race,simulation_hz,championship.has_value(),grid_seconds,held_on_grid);
                     if(championship) {
                         const auto league=srf::class_name(championship->league());

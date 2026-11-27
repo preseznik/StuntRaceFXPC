@@ -12,6 +12,88 @@ std::vector<std::size_t> changed_pixels(const std::vector<BYTE>& a,const std::ve
     return result;
 }
 
+void verify_night_owl_cones(const srf::Rom& rom,RaceLook look,const std::filesystem::path& output) {
+    using namespace srf;
+    const auto course=CourseId::night_owl;
+    const auto world=extract_world(rom,extract_course_scene(rom,course));
+    const auto inputs=read_inputs(std::filesystem::path(SRF_TEST_FIXTURES)/"night_owl_clean_inputs.csv");
+    NativeRace race(rom,PlayerCar::four_wd,course);
+    CourseScenery scenery(rom,course);
+    RaceGraphics graphics{};graphics.look=look;
+    Renderer renderer(nullptr,nullptr,0,graphics,course);
+    renderer.set_course_colors(generated::course_packages[unsigned(course)]);
+    renderer.load_textures(extract_vehicle_sprites(rom,course));
+    renderer.load_backdrop(extract_course_backdrop(rom,course));
+    renderer.load_world(world,0);
+    RaceAudioState audio;
+    for(unsigned phase:{130u,140u,350u}) {
+        while(race.phase()<phase) {
+            const auto& player=race.racers()[race.player_index()].body;
+            const auto input=inputs.at(race.phase());
+            RaceAudioOutput events;
+            scenery.step(player,player.word(0x7a));
+            race.step(prepare_player_input(audio,player,input.buttons,race.countdown_active(),events),input.ticks);
+        }
+        const auto cars=vehicle_poses(rom,race.racers(),race.racers(),race.player_index(),1);
+        const auto& player=cars[race.player_index()];
+        chase_camera(renderer,player,player.heading,{},course);
+        auto hidden=std::vector<SceneryPose>(race.cone_poses().begin(),race.cone_poses().end());
+        for(auto& cone:hidden)cone.visible=false;
+        renderer.load_race_world(world,cars,rom,race,scenery);
+        renderer.render();const auto normal=renderer.readback_bgra();
+        if(!output.empty() && look==RaceLook::classic)renderer.screenshot(output/("night-owl-cones-"+std::to_string(phase)+".png"));
+        renderer.load_world(world,0,cars,&rom,scenery.poses(),race.rock_poses(),hidden,race.bridge_poses(),scenery.sprites(),&race);
+        renderer.render();const auto empty=renderer.readback_bgra();
+        const auto visible=changed_pixels(normal,empty).size();
+        std::cout<<"Night Owl phase "<<phase<<": "<<visible<<" cone pixels\n";
+        if(phase==140 ? visible<500 : visible!=0)
+            throw std::runtime_error("Night Owl cone visibility at the road crest");
+    }
+}
+
+void verify_roadside_props(const srf::Rom& rom) {
+    using namespace srf;
+    controls=Controls{};controls.world=controls.race=true;controls.width=384;controls.height=216;
+    struct Sample {CourseId course;const char* fixture;unsigned phase,x,y,width,height;};
+    // These are the parts of each recorded view where the old actor pass
+    // painted animated scenery and the bases of two snowmen over the road.
+    for(const auto s:{Sample{CourseId::aqua_tunnel,"aqua_tunnel",1540,0,78,39,36},
+                      Sample{CourseId::sea_breeze,"sea_breeze",1260,218,81,40,14},
+                      Sample{CourseId::white_land,"white_land",1540,235,72,30,22}}) {
+        const auto world=extract_world(rom,extract_course_scene(rom,s.course));
+        NativeRace race(rom,PlayerCar::four_wd,s.course);
+        CourseScenery scenery(rom,s.course);
+        RaceAudioState audio;
+        const auto inputs=read_inputs(std::filesystem::path(SRF_TEST_FIXTURES)/(std::string(s.fixture)+"_clean_inputs.csv"));
+        while(race.phase()<s.phase) {
+            const auto& body=race.racers().back().body;
+            const auto input=inputs.at(race.phase());
+            scenery.step(body,body.word(0x7a));
+            RaceAudioOutput events;
+            race.step(prepare_player_input(audio,body,input.buttons,race.countdown_active(),events),input.ticks);
+        }
+        Renderer renderer(nullptr,nullptr,0,{},s.course);
+        renderer.set_course_colors(generated::course_packages[unsigned(s.course)]);
+        renderer.load_textures(extract_vehicle_sprites(rom,s.course));
+        renderer.load_backdrop(extract_course_backdrop(rom,s.course));
+        renderer.load_world(world,0);
+        const auto cars=vehicle_poses(rom,race.racers(),race.racers(),race.player_index(),1);
+        chase_camera(renderer,cars.back(),cars.back().heading,{},s.course);
+        renderer.load_race_world(world,cars,rom,race,scenery);
+        renderer.render();const auto game=renderer.readback_bgra();
+        // The reference retains geometric depth across the entire frame.
+        // Sample away from the car, which uses special road sorting by design.
+        renderer.load_world(world,0,cars,nullptr,scenery.poses(),race.rock_poses(),race.cone_poses(),
+                            race.bridge_poses(),scenery.sprites(),&race);
+        renderer.render();const auto reference=renderer.readback_bgra();
+        for(unsigned y=s.y;y<s.y+s.height;++y) {
+            const auto start=4*(y*controls.width+s.x);
+            if(!std::equal(game.begin()+start,game.begin()+start+4*s.width,reference.begin()+start))
+                throw std::runtime_error(std::string(s.fixture)+" prop visible through foreground geometry");
+        }
+    }
+}
+
 void verify_blue_lake_water(const srf::Rom& rom,const std::filesystem::path& output) {
     const auto course=srf::StuntCourse::blue_lake;
     srf::RockFieldSession session(rom,srf::PlayerCar::four_wd,course);
@@ -140,7 +222,9 @@ int wmain(int argc,wchar_t** argv) {
         const auto world=srf::extract_world(rom,drive.scene());
         const auto route=read_stunt_controls(std::filesystem::path(SRF_TEST_FIXTURES)/"up_down_native_inputs.csv","4wd");
         check(CoInitializeEx(nullptr,COINIT_MULTITHREADED),"COM");
+        verify_roadside_props(rom);
         controls=Controls{};controls.world=controls.race=true;controls.width=960;controls.height=540;
+        for(auto look:{RaceLook::classic,RaceLook::n64,RaceLook::remastered})verify_night_owl_cones(rom,look,output);
         verify_blue_lake_water(rom,output);
         controls=Controls{};controls.world=controls.race=true;controls.width=960;controls.height=540;
         Renderer renderer(nullptr);

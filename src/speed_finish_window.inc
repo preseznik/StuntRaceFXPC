@@ -87,7 +87,7 @@ void draw_finish_scene(Renderer& renderer,const srf::Rom& rom,const srf::World& 
     const auto sprite_yaw=static_cast<std::uint8_t>(-(static_cast<std::uint16_t>(std::lround(-controls.yaw*angle_units))>>8));
     auto cars=vehicle_poses(rom,frame.vehicles,next.vehicles,player,blend,true,
         look==RaceLook::remastered?&next.wheel_travel:nullptr,surface,look==RaceLook::n64,sprite_yaw);
-    if(look==RaceLook::remastered)seat_opponents(cars,surface);
+    road.seat_vehicles(cars,surface);
     auto target=cars[player].position;
     target[1]-=50;
     const auto center=renderer.normalize_world(target);

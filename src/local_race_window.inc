@@ -11,14 +11,16 @@ std::uint16_t local_keyboard(const BootWindowInput& keys,bool second) {
     if(held('A','J',VK_LEFT))buttons|=1;
     if(held('D','L',VK_RIGHT))buttons|=2;
     if(held(VK_SPACE,'U',VK_SPACE))buttons|=0x400;
+    if(held(VK_SHIFT,'Y',VK_SHIFT))buttons|=srf::drift_button;
     if(held('X','O','X'))buttons|=0x20;
     return buttons;
 }
 
 void play_local_race(GameHost& host,const srf::Rom& rom,srf::LocalCourse course,srf::PlayerCar first,
-                     srf::PlayerCar second,bool cpu,const std::filesystem::path& controller) {
+                     srf::PlayerCar second,bool cpu,const std::filesystem::path& controller,
+                     srf::DrivingPhysics physics=srf::DrivingPhysics::original,bool direct=false) {
     using namespace srf;
-    LocalRace race(rom,course,first,second,cpu);
+    LocalRace race(rom,course,first,second,cpu,{},physics);
     const bool battle=race.count()==2;
     const auto world=extract_world(rom,race.scene());
     auto& renderer=*host.presenter;
@@ -54,11 +56,15 @@ void play_local_race(GameHost& host,const srf::Rom& rom,srf::LocalCourse course,
     unsigned countdown=42;
     bool paused=false,was_paused=false,last_r=false,last_p=false,last_h=false;
     std::wstring caption;
+    std::optional<DriftTrails> drift_trails;
+    if(physics==DrivingPhysics::enhanced)drift_trails.emplace(world,CourseId::easy_ride);
     WetTireSpray spray;
     const bool wet=renderer.rain_spray_enabled();
     std::array<Vehicle,2> previous{};
+    std::array<DriftInput,2> drifts{};
     const auto reset=[&]{
         spray.begin_phase(0);
+        if(drift_trails)drift_trails->reset();
         race.reset();countdown=42;remainder=0;paused=false;motor={};
         for(unsigned i=0;i<race.count();++i)previous[i]=race.car(i);
         keys.suppress_held();last=Clock::now();
@@ -85,6 +91,7 @@ void play_local_race(GameHost& host,const srf::Rom& rom,srf::LocalCourse course,
         const auto now=Clock::now();
         const auto elapsed=std::min(.20,std::chrono::duration<double>(now-last).count());last=now;
         const bool hold=!focused || paused;
+        for(unsigned i=0;i<race.count();++i)drifts[i].sample(input[i].requested,!hold && !countdown);
         if(audio && was_paused!=hold)audio->pause(hold);
         was_paused=hold;
         if(!hold){
@@ -99,7 +106,12 @@ void play_local_race(GameHost& host,const srf::Rom& rom,srf::LocalCourse course,
                 --countdown;continue;
             }
             for(unsigned i=0;i<race.count();++i)previous[i]=race.car(i);
-            race.step({input[0].requested,input[1].requested},{input[0].steering_q15,input[1].steering_q15});
+            race.step({drifts[0].consume(input[0].requested),drifts[1].consume(input[1].requested)},
+                      {input[0].steering_q15,input[1].steering_q15});
+            if(drift_trails) {
+                drift_trails->begin_phase(race.phase());
+                for(unsigned i=0;i<race.count();++i)drift_trails->emit(race.phase(),i,previous[i],race.car(i));
+            }
             if(wet) {
                 spray.begin_phase(race.phase());
                 for(unsigned i=0;i<race.count();++i)spray.emit(race.phase(),i,previous[i],race.car(i));
@@ -114,7 +126,7 @@ void play_local_race(GameHost& host,const srf::Rom& rom,srf::LocalCourse course,
             if(audio)audio->pause(true);
             const auto winner=*race.result();
             const auto text=!battle?(winner==0?L"Three laps complete":L"Practice ended"):winner==2?L"Draw":winner==0?L"Player 1 wins":cpu?L"CPU wins":L"Player 2 wins";
-            if(!game_result(host,{L"Results",std::wstring(course.name),text,L"Retry",L"Course selection"}))return;
+            if(!game_result(host,{L"Results",std::wstring(course.name),text,L"Retry",direct?L"Exit":L"Course selection"}))return;
             reset();continue;
         }
         if(!focused && !game_xr){Sleep(12);continue;}
@@ -156,9 +168,11 @@ void play_local_race(GameHost& host,const srf::Rom& rom,srf::LocalCourse course,
         if(battle)renderer.render({},[&](unsigned i){
             camera(i);
             if(wet)renderer.load_spray(spray,phase);
+            if(drift_trails)renderer.load_drift(*drift_trails,phase);
         });
         else {
             if(wet)renderer.load_spray(spray,phase);
+            if(drift_trails)renderer.load_drift(*drift_trails,phase);
             renderer.render();
         }
     }

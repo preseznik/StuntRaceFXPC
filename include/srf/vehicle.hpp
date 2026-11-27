@@ -7,6 +7,8 @@
 #include <vector>
 
 namespace srf {
+enum class DrivingPhysics { original, enhanced };
+inline constexpr int drift_boost_min_ticks=10,drift_boost_full_ticks=28;
 // Original vehicle record only, not a console address space. Words retain the
 // original modulo-65536 representation for collision and differential validation.
 struct VehicleState {
@@ -16,7 +18,12 @@ struct VehicleState {
 };
 struct Vehicle {
     VehicleState body;
+    std::uint16_t custom_shell{};
     std::array<VehicleState,4> wheels; // Only first0x52 bytes are original wheel fields.
+    std::array<unsigned,4> tire_diameters{};
+    std::uint8_t drift_ticks{};
+    std::int8_t drift_direction{};
+    std::uint8_t drift_charge_ticks{};
 };
 class Rom;
 struct Scene;
@@ -55,6 +62,7 @@ struct VehicleForces {
     // Original GSU2334..233E: linear XYZ, then angular yaw/pitch/roll.
     std::array<std::uint16_t, 6> words{};
     std::array<std::uint16_t, 2> contact_friction{};
+    unsigned rear_grip_percent=100;
     // Ledger only: words still contains the exact original combined response.
     // Body-contact kicks and control80 are impulses; wheel spring/damper,
     // traction, braking and gravity remain continuous. Direct nearby-crash
@@ -82,6 +90,7 @@ struct VehicleDriveContext {
     std::optional<std::int16_t> loading_contact_y{};
 };
 struct CollisionShape;
+struct CourseWall;
 struct BodyContactCandidate;
 struct RoutePoint;
 struct WheelContactTuning;
@@ -100,8 +109,13 @@ struct VehicleStepEnvironment {
     // Player only: -32767 left, +32767 right; absence keeps exact digital logic.
     std::optional<std::int16_t> steering_q15;
     // The bonus trailer has a fifth contact on the nose of its tractor unit.
+    bool kasumi_walls{};
     VehicleState* trailer_guide{};
     const CollisionShape* trailer_guide_surface{};
+    DrivingPhysics physics{DrivingPhysics::original};
+    bool drift_held{};
+    std::span<const CourseWall> walls{};
+    std::span<const CollisionShape> course_shapes{};
 };
 struct VehicleStepResult {
     VehicleForces forces;

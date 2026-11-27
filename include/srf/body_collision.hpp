@@ -1,5 +1,5 @@
 #pragma once
-#include "srf/vehicle.hpp"
+#include "srf/race.hpp"
 
 namespace srf {
 struct BodyContactCandidate {
@@ -10,6 +10,7 @@ struct BodyContactCandidate {
 };
 struct BodyCollisionContext {
     std::uint16_t damage_mode{}, difficulty{}; // Original263C and26F4.
+    DrivingPhysics physics{DrivingPhysics::original};
 };
 struct BodyCollisionWork {
     std::array<std::uint16_t,3> force{}, normal{};
@@ -24,6 +25,10 @@ struct RadialImpulse {
 RadialImpulse radial_body_impulse(const VehicleState&,const BodyContactCandidate&);
 // Original04:CA99 radial/closing-speed rejection after the AABB test.
 bool body_pair_overlap_filter(const VehicleState&,const VehicleState&);
+// Sweep the racers together after their individual driving and terrain updates.
+void resolve_racer_contacts(std::span<Vehicle>,std::span<const RacePosition> previous,
+                            std::span<const VehicleTuning>,std::span<const CourseWall>,
+                            std::span<const CollisionShape>,std::span<Vehicle> midpoint={});
 // Original04:BD20 for the4WD's bit0x10 body-response path, including cached
 // candidate order and exact original04:9301/944C force arithmetic.
 void update_body_collisions(VehicleState&, VehicleForces&,

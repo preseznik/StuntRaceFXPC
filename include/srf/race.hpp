@@ -100,8 +100,20 @@ struct PlaneContact {
     RacePosition normal{};
 };
 using ContactManifold = std::array<PlaneContact, 19>;
+// Finite barrier in world coordinates. Y increases downwards. Moving decks
+// select their wall geometry with the same shape frame as the wheels.
+struct CourseWall {
+    Vertex a,b; // bottom edge
+    int top_a,top_b;
+    int shape=-1,frame=0;
+};
+std::optional<CourseWall> course_wall_from_face(std::span<const Vertex>);
+void add_visible_course_walls(std::vector<CourseWall>& walls,const Rom&,const Scene&);
+// Returns the absorbed horizontal impulse for the existing crash/damage sample.
+std::array<int,2> resolve_course_walls(Vehicle&,RacePosition previous,const std::array<std::uint16_t,9>& orientation,
+                                      std::span<const CourseWall>,std::span<const CollisionShape>);
 std::vector<CollisionShape> extract_easy_ride_collision(const Rom& rom);
-std::vector<CollisionShape> extract_collision(const Rom& rom, const Scene& scene);
+std::vector<CollisionShape> extract_collision(const Rom& rom, const Scene& scene,std::vector<CourseWall>* walls=nullptr);
 // Original 04:A20B broadphase uses strict AABB overlap and signed-word arithmetic.
 bool collision_bounds_overlap(RacePosition a, std::array<std::uint16_t, 3> a_extents,
                               RacePosition b, std::array<std::uint16_t, 3> b_extents);

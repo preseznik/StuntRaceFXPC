@@ -2,11 +2,14 @@
 #include "srf/bonus_hud_tiles.hpp"
 #include "srf/championship.hpp"
 #include "srf/vehicle.hpp"
+#include "srf/custom_content.hpp"
 
 namespace srf {
 class CourseHudMap {
     std::array<std::uint8_t,16*32> route{};
     std::vector<std::uint8_t> markers;
+    std::array<bool,32*32> custom_route{};
+    bool custom{};
     std::array<std::uint32_t,16> palette;
 
 public:
@@ -22,7 +25,26 @@ public:
         }
     }
 
+    CourseHudMap(const Rom& rom,CourseId course,std::size_t palette_offset=0xf8960)
+        :CourseHudMap(rom,static_cast<unsigned>(asset_course(course)),palette_offset) {
+        if(!custom_course(course))return;
+        custom=true;
+        const auto scene=course==kasumi_loop.id?kasumi_scene():mesa_scene();
+        for(unsigned i=0;i<scene.points.size();++i) {
+            const auto a=scene.points[i].position,b=scene.points[(i+1)%scene.points.size()].position;
+            for(int t=0;t<=16;++t) {
+                const int x=16+((a.x+(b.x-a.x)*t/16)>>11),y=16+((-(a.z+(b.z-a.z)*t/16))>>11);
+                custom_route.at(y*32+x)=true;
+            }
+        }
+    }
+
     void draw_route(std::span<std::uint32_t> art,int left) const {
+        if(custom) {
+            for(int y=0;y<32;++y)for(int x=0;x<32;++x)
+                if(custom_route[y*32+x] && left+x>=0 && left+x<208)art[208*(80+y)+left+x]=0xffffffff;
+            return;
+        }
         for(int row=0;row<4;++row)
             for(int col=0;col<4;++col)
                 draw_bonus_hud_tile(art,208,left+8*col,80+8*row,route,4*row+col,palette);

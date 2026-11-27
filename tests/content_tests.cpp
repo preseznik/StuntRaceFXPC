@@ -1,9 +1,11 @@
 #include "srf/native_race.hpp"
+#include "srf/custom_content.hpp"
 #include "srf/race_audio.hpp"
 #include "srf/rom.hpp"
 #include "srf/world.hpp"
 #include <algorithm>
 #include <cstdlib>
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 
@@ -296,11 +298,158 @@ int wmain(int argc,wchar_t** argv) {
             legacy.step(input,4);explicit_default.step(input,4);
             require(equal(legacy.racers(),explicit_default.racers()),"Default 4WD trajectory changed");
         }
+        const auto city=srf::kasumi_scene();
+        const auto city_strips=srf::custom_collision(city);
+        require(city_strips.size()==srf::kasumi_loop.route_points,"Incomplete city road collision");
+        srf::World urban{};
+        srf::add_custom_models(urban,srf::kasumi_loop.id);
+        const auto viaduct=std::ranges::find(urban.models,srf::city_road,&srf::WorldModel::descriptor_address);
+        require(viaduct!=urban.models.end(),"Missing viaduct");
+        // Both districts must be on the racing line. Side scenery alone must
+        // never satisfy the two descents, climbs and road-width transitions.
+        unsigned descents=0,climbs=0;
+        double lap_length=0;
+        int narrowest=10000,widest=0;
+        for(unsigned i=0;i<city.points.size();++i) {
+            const auto a=city.points[i].position,b=city.points[(i+1)%city.points.size()].position;
+            lap_length+=std::hypot(a.x-b.x,a.z-b.z,a.y-b.y);
+            if(a.y<-900 && b.y>=-900)++descents;
+            if(a.y>=-900 && b.y<-900)++climbs;
+            const auto& strip=city_strips[i];
+            // Opposite corners of the strip's near edge, in collision space.
+            const auto l=strip.planes[0].point,r=strip.planes[1].point;
+            const int w=int(std::hypot(l[0]-r[0],l[2]-r[2]));
+            narrowest=std::min(narrowest,w);widest=std::max(widest,w);
+        }
+        require(lap_length>180000 && descents==2 && climbs==2,"Kasumi main route or grade changes missing");
+        require(widest>2*narrowest,"Kasumi lane-width transitions missing");
+        unsigned street_ramps=0;
+        for(const auto& face:viaduct->primitives) {
+            const auto& v=viaduct->frames.front();
+            const auto a=v[face.indices[0]],b=v[face.indices[1]],c=v[face.indices[2]];
+            const srf::RacePosition p{std::int16_t((a.x+b.x+c.x)/3),std::int16_t((a.y+b.y+c.y)/3),std::int16_t((a.z+b.z+c.z)/3)};
+            const bool supported=std::ranges::any_of(city_strips,[&](const auto& strip){
+                auto hit=srf::custom_surface(srf::city_road,strip.command_offset-1,p);
+                return hit && !hit->dirt && std::abs(hit->y-p[1])<=3;
+            });
+            require(supported,"Kasumi road or ramp differs from its wheel contact surface");
+            if(p[1]>-100)++street_ramps;
+        }
+        require(street_ramps>=2,"Missing street-level ramp approaches");
+        // Accelerate into the left and right parapets on the opening viaduct.
+        // Require wheel support throughout and a sustained brush with the wall.
+        for(unsigned steer:{1u,2u}) {
+            srf::NativeRace impact(rom,steer==1?srf::PlayerCar::cargo:srf::PlayerCar::four_wd,srf::kasumi_loop.id);
+            unsigned contacts=0;
+            for(unsigned tick=0;tick<122;++tick) {
+                impact.step(16|(tick>=80?steer:0));
+                const auto& body=impact.racers()[impact.player_index()].body;
+                const srf::RacePosition center{std::int16_t(body.word(0x1e)),std::int16_t(body.word(0x20)),std::int16_t(body.word(0x22))};
+                bool on_deck=false;
+                for(const auto& strip:city_strips) {
+                    const auto floor=srf::custom_surface(srf::city_road,strip.command_offset-1,center);
+                    if(!floor || std::abs(floor->y-center[1])>250)continue;
+                    on_deck=true;
+                    for(int side:{0,1}) {
+                        const auto a=strip.planes[side].point,b=strip.planes[3-side].point;
+                        const double tx=b[0]-a[0],tz=b[2]-a[2];
+                        const double dx=center[0]-strip.position[0]-a[0],dz=center[2]-strip.position[2]-a[2];
+                        const double clearance=std::abs(dx*tz-dz*tx)/std::hypot(tx,tz)-100;
+                        require(clearance>100,"Kasumi vehicle penetrated a parapet");
+                        if(tick>=80 && clearance<215)++contacts;
+                    }
+                }
+                require(on_deck,"Kasumi wall impact lost road support");
+            }
+            require(contacts>=5,"Kasumi impact replay missed the wall");
+        }
+        const auto mesa=srf::mesa_scene();
+        const auto strips=srf::custom_collision(mesa);
+        // Every triangle on the eastern rim and in the southern wash must support
+        // a wheel at its rendered height, including both sides of the bank.
+        srf::World authored{};
+        srf::add_custom_models(authored,srf::CourseId::ember_mesa);
+        const auto& road=*std::ranges::find(authored.models,srf::mesa_road,&srf::WorldModel::descriptor_address);
+        // The sand and road partition a 72000-square plain. Check winding as
+        // well as area so a folded inside shoulder cannot cancel a nearby gap.
+        std::int64_t covered=0;
+        for(const auto& model:authored.models) {
+            for(const auto& face:model.primitives) {
+                const auto& v=model.frames.front();
+                if(model.descriptor_address!=srf::mesa_road &&
+                   !(model.descriptor_address==srf::mesa_land && face.attributes[2]==8 &&
+                     std::ranges::all_of(face.indices,[&](auto i){return v[i].y==0;})))continue;
+                const auto a=v[face.indices[0]];
+                for(unsigned t=2;t<face.indices.size();++t) {
+                    const auto b=v[face.indices[t-1]],c=v[face.indices[t]];
+                    const auto area=std::int64_t(b.x-a.x)*(c.z-a.z)-std::int64_t(b.z-a.z)*(c.x-a.x);
+                    require(area>=0,"Ember Mesa ground triangle folded over");
+                    covered+=area;
+                }
+            }
+        }
+        // Clipping the boundary at each slab rounds X to an integer world unit.
+        require(std::abs(covered-2LL*72000*72000)<20000,"Ember Mesa sand and track coverage disagree");
+        unsigned elevated=0,banked=0,fill=0,wash_pavement=0,wash_banks=0;
+        for(const auto& face:road.primitives) {
+            const auto& vertices=road.frames.front();
+            for(unsigned t=1;t+1<face.indices.size();++t) {
+                const auto a=vertices[face.indices[0]],b=vertices[face.indices[t]],c=vertices[face.indices[t+1]];
+                const int y=(a.y+b.y+c.y)/3;
+                if(std::abs(y)<100)continue;
+                const srf::RacePosition p{std::int16_t((a.x+b.x+c.x)/3),std::int16_t(y),std::int16_t((a.z+b.z+c.z)/3)};
+                bool matched=false;
+                for(unsigned i=0;i<strips.size();++i) {
+                    auto hit=srf::custom_surface(srf::mesa_road,i,p);
+                    if(!hit || std::abs(hit->y-y)>2 || hit->normal[1]>=0)continue;
+                    require(hit->dirt==(face.attributes[2]==7),"Ember Mesa fill and road grip differ from mesh");
+                    elevated+=y<-1450 && !hit->dirt;
+                    banked+=face.attributes[2]==0x2a && std::hypot(hit->normal[0],hit->normal[2])>4300;
+                    fill+=y<0 && hit->dirt;
+                    wash_pavement+=y>500 && face.attributes[2]==0x2a;
+                    wash_banks+=y>100 && hit->dirt;
+                    matched=true;break;
+                }
+                require(matched,"Ember Mesa rendered slope has no matching wheel support");
+            }
+        }
+        require(elevated && banked && fill,"Ember Mesa crest, bank or fill missing");
+        require(wash_pavement && wash_banks,"Ember Mesa dry wash missing pavement or bank contact");
+        srf::Vehicle probe{};
+        srf::VehicleContactCandidates candidates{};
+        for(const auto& strip:strips) {
+            // Across the seam, sample the center and both lanes.
+            for(int lane:{1,2,3}) {
+                for(auto& wheel:probe.wheels)for(unsigned axis:{0U,2U}) {
+                    const int a=strip.planes[0].point[axis],b=strip.planes[1].point[axis];
+                    wheel.word(0x1e + 2*axis)=std::uint16_t(strip.position[axis]+a+(b-a)*lane/4);
+                }
+                srf::refresh_vehicle_contact_candidates(probe,strips,candidates);
+                require(!candidates[0].empty(),"Ember Mesa road seam lost paved contact");
+            }
+        }
+        for(auto& wheel:probe.wheels)wheel.word(0x1e)=wheel.word(0x22)=0;
+        srf::refresh_vehicle_contact_candidates(probe,strips,candidates);
+        require(candidates[0].empty(),"Ember Mesa infield received asphalt grip");
+        for(auto car:{srf::PlayerCar::coupe,srf::PlayerCar::four_wd,srf::PlayerCar::f_type,srf::PlayerCar::kestrel}) {
+            srf::NativeRace race(rom,car,srf::CourseId::ember_mesa);
+            for(int i=0;i<95;++i) {
+                race.step(0x10);
+                if(i<30)continue;
+                const auto& player=race.racers()[race.player_index()];
+                require(!player.body.word(0x46),"Rough-ground response on Ember Mesa straight");
+                for(const auto& w:player.wheels) {
+                    const int contact=std::int16_t(w.word(0x20))+std::int16_t(w.word(0x4c));
+                    require(contact<=2,"Ember Mesa wheel contact below asphalt");
+                }
+            }
+        }
+        std::cout<<"PASS Ember Mesa seam coverage, asphalt contact and infield\n";
         bool rejected=false;
-        try {srf::NativeRace invalid(rom,static_cast<srf::PlayerCar>(3));} catch(const std::invalid_argument&) {rejected=true;}
+        try {srf::NativeRace invalid(rom,static_cast<srf::PlayerCar>(5));} catch(const std::invalid_argument&) {rejected=true;}
         require(rejected,"Unsupported car accepted");
         rejected=false;
-        try {srf::NativeRace invalid(rom,srf::PlayerCar::four_wd,static_cast<srf::CourseId>(srf::courses.size()));} catch(const std::invalid_argument&) {rejected=true;}
+        try {srf::NativeRace invalid(rom,srf::PlayerCar::four_wd,static_cast<srf::CourseId>(unsigned(srf::kasumi_loop.id)+1));} catch(const std::invalid_argument&) {rejected=true;}
         require(rejected,"Unsupported course accepted");
         std::cout<<"PASS default compatibility and invalid selection\n";
         return 0;

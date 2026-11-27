@@ -8,14 +8,22 @@ using System.Threading.Channels;
 namespace StuntRaceFX.Launcher;
 
 internal sealed record LanDriver(string Name, string Car, bool Ready = false);
-internal sealed record LanGrid(string Course, string[] Cars, int Seat, bool DropIn = false, int Round = 0);
+internal sealed record LanGrid(string Course, string[] Cars, int Seat, bool DropIn = false, int Round = 0, bool EnhancedPhysics = false);
 internal sealed record LanMessage(string Kind, string Text = "", LanDriver? Driver = null, string? Course = null,
-    int Round = 0, int Seat = 0, LanDriver?[]? Roster = null);
+    int Round = 0, int Seat = 0, LanDriver?[]? Roster = null, bool CustomContent = false,
+    int PhysicsRevision = 0, bool EnhancedPhysics = false);
 
 internal sealed class LanLobby : IDisposable
 {
     internal const int Port = 48276, MaxDrivers = 4;
     internal const string Protocol = "SRF-LAN/5";
+    internal static string LobbyProtocol(bool customContent) => customContent ? Protocol + "/custom9" : Protocol;
+    internal string SessionProtocol => LobbyProtocol(customContent);
+    private readonly bool customContent;
+    private readonly bool supportsEnhancedPhysics;
+    internal bool EnhancedPhysics { get; private set; }
+    internal bool CustomAllowed { get; private set; }
+    private bool AllowsCar(string car) => Cars.Contains(car) || CustomAllowed && GameContent.CustomCars.Contains(car);
     internal static readonly string[] Cars = ["4wd", "coupe", "f-type"];
     private const int MaxReplayTicks = 1_000_000;
     private sealed class Connection(TcpClient socket)
@@ -53,9 +61,14 @@ internal sealed class LanLobby : IDisposable
     internal event Action<string>? Finished;
     internal int ListeningPort => ((IPEndPoint)listener!.LocalEndpoint).Port;
 
-    internal LanLobby(bool host, string name, string car, Func<LanGrid, Process> launch, int capacity = MaxDrivers)
+    internal LanLobby(bool host, string name, string car, Func<LanGrid, Process> launch, int capacity = MaxDrivers, bool customContent = false,
+        bool enhancedPhysics = false, bool supportsEnhancedPhysics = false)
     {
         if (capacity is < 2 or > MaxDrivers) throw new ArgumentOutOfRangeException(nameof(capacity));
+        CustomAllowed = this.customContent = customContent;
+        this.supportsEnhancedPhysics = supportsEnhancedPhysics;
+        EnhancedPhysics = host && enhancedPhysics;
+        if (EnhancedPhysics && !supportsEnhancedPhysics) throw new InvalidOperationException("Rebuild the game to host with Enhanced physics.");
         Host = host;
         seat = host ? 0 : -1;
         Local = new(name.Trim(), car);
@@ -117,14 +130,15 @@ internal sealed class LanLobby : IDisposable
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         timeout.CancelAfter(TimeSpan.FromSeconds(8));
         await connection.Socket.ConnectAsync(address.Trim(), port, timeout.Token);
-        await Send(connection, new("join", Protocol, Local));
+        await Send(connection, new("join", Protocol, Local, CustomContent:customContent,
+            PhysicsRevision:supportsEnhancedPhysics ? GameContent.RacerPhysicsVersion : 0));
         _ = Receive(0, connection);
     }
 
-    private static void Validate(LanDriver? d)
+    private void Validate(LanDriver? d)
     {
         if (d == null || string.IsNullOrWhiteSpace(d.Name) || d.Name.Length > 32 ||
-            d.Name.Any(char.IsControl) || !Cars.Contains(d.Car)) throw new InvalidDataException("Invalid LAN driver.");
+            d.Name.Any(char.IsControl) || !AllowsCar(d.Car)) throw new InvalidDataException("Invalid LAN driver.");
     }
 
     private Task Send(LanMessage message) => Send(links[0] ?? throw new IOException("Host disconnected."), message);
@@ -180,14 +194,27 @@ internal sealed class LanLobby : IDisposable
                 if (!link.Joined)
                 {
                     if (!Host && msg.Kind == "busy") throw new IOException(msg.Text == "Race in progress." ? msg.Text : "Lobby is full.");
-                    if (msg.Kind != (Host ? "join" : "welcome") || msg.Text != Protocol)
-                        throw new InvalidDataException("Incompatible LAN protocol. Use the same launcher build.");
+                    if (!Host && msg.Kind == "incompatible") throw new InvalidDataException(msg.Text);
+                    if (msg.Kind != (Host ? "join" : "welcome") ||
+                        !(msg.Text == Protocol || !Host && customContent && msg.Text == SessionProtocol))
+                        throw new InvalidDataException("Incompatible LAN protocol.");
+                    if (Host && ((customContent && !msg.CustomContent) || (!customContent && GameContent.CustomCars.Contains(msg.Driver?.Car)))) {
+                        var reason = customContent ? "Enable Custom content to join this lobby." : "Select a stock car for this lobby.";
+                        await Send(link,new("incompatible",reason));
+                        throw new InvalidDataException(reason);
+                    }
                     if (Host)
                     {
+                        if (EnhancedPhysics && msg.PhysicsRevision != GameContent.RacerPhysicsVersion) {
+                            const string reason = "This lobby uses Enhanced physics. Update the launcher and rebuild the game to join.";
+                            await Send(link,new("incompatible",reason));
+                            throw new InvalidDataException(reason);
+                        }
                         Validate(msg.Driver);
                         var active = grid;
                         Drivers[index] = msg.Driver! with { Ready = false, Car = active?.Cars[index] ?? msg.Driver.Car };
-                        var welcome = Send(link,new("welcome",Protocol,Course:Course,Seat:index,Roster:[.. Drivers]));
+                        var welcome = Send(link,new("welcome",SessionProtocol,Course:Course,Seat:index,Roster:[.. Drivers],EnhancedPhysics:EnhancedPhysics,
+                            PhysicsRevision:EnhancedPhysics ? GameContent.RacerPhysicsVersion : 0));
                         link.Joined = true;
                         var start = active == null ? Task.CompletedTask : Send(link,StartMessage(active,true));
                         await welcome;
@@ -196,6 +223,10 @@ internal sealed class LanLobby : IDisposable
                     }
                     else
                     {
+                        CustomAllowed = customContent && msg.Text == LobbyProtocol(true);
+                        EnhancedPhysics = msg.EnhancedPhysics;
+                        if (EnhancedPhysics && (!supportsEnhancedPhysics || msg.PhysicsRevision != GameContent.RacerPhysicsVersion))
+                            throw new InvalidDataException("Enhanced physics versions differ. Update the launcher and rebuild the game on each PC.");
                         seat = msg.Seat;
                         ReadRoster(msg);
                         link.Joined = true;
@@ -221,11 +252,11 @@ internal sealed class LanLobby : IDisposable
                         break;
                     case "start" or "dropin" when !Host && !Racing:
                         var cars = msg.Text.Split(' ');
-                        if (msg.Course != Course || cars.Length != Drivers.Length || cars.Any(c => !Cars.Contains(c)))
+                        if (msg.Course != Course || cars.Length != Drivers.Length || cars.Any(c => !AllowsCar(c)))
                             throw new InvalidDataException("Invalid starting grid.");
                         Drivers[seat] = Local = Local with { Car = cars[seat] };
-                        if (msg.Kind == "dropin") Log?.Invoke($"Joining {GameContent.Course(Course).Name} in the {Local.Car}.");
-                        Begin(new(Course,cars,seat,msg.Kind == "dropin",msg.Round));
+                        if (msg.Kind == "dropin") Log?.Invoke($"Joining {GameContent.Course(Course).Name} in the {GameContent.DisplayCar(Local.Car)}.");
+                        Begin(new(Course,cars,seat,msg.Kind == "dropin",msg.Round,EnhancedPhysics));
                         break;
                     case "race" or "abandon" or "ended" when grid == null || msg.Round != grid.Round:
                         continue;
@@ -264,7 +295,7 @@ internal sealed class LanLobby : IDisposable
         Drivers = roster;
         Local = roster[seat]!;
     }
-    private static string ValidCourse(string? course) => course != null && GameContent.LanCourseVersions.ContainsKey(course)
+    private string ValidCourse(string? course) => course != null && GameContent.AllowsCourse(course, CustomAllowed) && GameContent.LanCourseVersions.ContainsKey(course)
         ? course : throw new InvalidDataException("Unsupported LAN course.");
 
     internal async Task SetDriver(string car, bool ready)
@@ -303,7 +334,7 @@ internal sealed class LanLobby : IDisposable
     {
         if (!Host || Racing || (!force && !AllReady)) throw new InvalidOperationException("Ready all connected drivers or use Force Start.");
         var cars = Drivers.Select((d,i) => d?.Car ?? Cars[i % Cars.Length]).ToArray();
-        var active = new LanGrid(Course,cars,0,Round:++nextRound);
+        var active = new LanGrid(Course,cars,0,Round:++nextRound,EnhancedPhysics:EnhancedPhysics);
         var announcing = Broadcast(StartMessage(active,false));
         Begin(active);
         await announcing;
@@ -385,7 +416,7 @@ internal sealed class LanLobby : IDisposable
             {
                 link.Live = true;
                 Handoff?.Invoke($"{tick} {input.State}");
-                Log?.Invoke($"{Drivers[index]?.Name} took over the {active.Cars[index]}.");
+                Log?.Invoke($"{Drivers[index]?.Name} took over the {GameContent.DisplayCar(active.Cars[index])}.");
             }
         }
         if (history.Count < MaxReplayTicks) history.Add(body);
@@ -548,7 +579,7 @@ internal sealed class LanLobby : IDisposable
         links[index] = null;
         link.Socket.Dispose();
         link.Inbox.Writer.TryComplete();
-        if (Racing) Log?.Invoke($"CPU driving the {grid!.Cars[index]}. The seat is open.");
+        if (Racing) Log?.Invoke($"CPU driving the {GameContent.DisplayCar(grid!.Cars[index])}. The seat is open.");
         _ = PublishRoster();
         Log?.Invoke(reason);
         Changed?.Invoke();

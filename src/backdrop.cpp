@@ -178,9 +178,26 @@ static CourseBackdrop extract_indexed_backdrop(const Rom& rom,unsigned index,Cou
 }
 
 CourseBackdrop extract_course_backdrop(const Rom& rom,CourseId course) {
-    const auto index=static_cast<unsigned>(course_definition(course).id);
+    const auto index=static_cast<unsigned>(course_definition(asset_course(course)).id);
     if(course==CourseId::easy_ride)return {};
-    return extract_indexed_backdrop(rom,index,course);
+    auto sky=extract_indexed_backdrop(rom,index,course);
+    if(course==CourseId::kasumi_loop) {
+        // Keep the sky gradient above a distant, seamless ring of city blocks.
+        for(unsigned layer=0;layer<sky.indices.size();++layer) {
+            auto& pixels=sky.indices[layer];
+            auto& palette=sky.palettes[layer];
+            palette[2]=13|(17<<5)|(20<<10);
+            palette[3]=10|(14<<5)|(18<<10);
+            palette[4]=17|(20<<5)|(21<<10);
+            for(unsigned x=0;x<sky.width;++x) {
+                const unsigned block=x/16,side=x%16;
+                const unsigned roof=209-(block*17+block/3)%21+(side==15?7:0);
+                for(unsigned y=0;y<sky.height;++y)
+                    pixels[y*sky.width+x]=y<roof?1:(y<218 && (y-roof)%4==2 && side%5<2?4:2+block%2);
+            }
+        }
+    }
+    return sky;
 }
 
 CourseBackdrop extract_speed_bonus_backdrop(const Rom& rom) {

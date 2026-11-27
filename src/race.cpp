@@ -1,4 +1,5 @@
 #include "srf/race.hpp"
+#include "srf/custom_content.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -10,6 +11,7 @@ RaceClockTuning extract_easy_ride_clock(const Rom& rom) {
     return extract_course_clock(rom,CourseId::easy_ride);
 }
 RaceClockTuning extract_course_clock(const Rom& rom, CourseId id,std::uint16_t vehicle_definition) {
+    if(custom_course(id))return {90,{40,40},0,extract_easy_ride_clock(rom).units_per_tick};
     const auto decimal=[](std::uint16_t packed) {
         unsigned result=0,multiplier=1;
         for(unsigned digit=0;digit<4;++digit) {
@@ -236,7 +238,8 @@ RacePosition quarter_rotate(RacePosition v, std::uint8_t yaw, bool inverse) {
 std::vector<CollisionShape> extract_easy_ride_collision(const Rom& rom) {
     return extract_collision(rom,extract_easy_ride(rom));
 }
-std::vector<CollisionShape> extract_collision(const Rom& rom, const Scene& scene) {
+std::vector<CollisionShape> extract_collision(const Rom& rom, const Scene& scene,std::vector<CourseWall>* walls) {
+    if(scene.authored)return custom_collision(scene);
     const auto meshes = extract_meshes(rom);
     const auto& bytes = rom.bytes();
     const auto read_word = [&bytes](std::size_t p) {
@@ -325,6 +328,20 @@ std::vector<CollisionShape> extract_collision(const Rom& rom, const Scene& scene
                 }
             }
             frames[f].push_back({{wrap(v.x*scale),wrap(v.y*scale),wrap(v.z*scale)},normal,flags});
+            // Solid side faces, including banked walls. Group-clipping planes
+            // (bit 7), road surfaces and ramps stay out of the chassis sweep.
+            if(walls && !(flags&0x80) && 3*std::abs(int(normal[1]))<std::max(std::abs(int(normal[0])),std::abs(int(normal[2])))) {
+                std::vector<Vertex> face_vertices;
+                for(auto index:face.indices) {
+                    const auto& p=vertices.at(index);
+                    const auto r=quarter_rotate({wrap(p.x*scale),wrap(p.y*scale),wrap(p.z*scale)},shape.orientation,false);
+                    face_vertices.push_back({object.position.x+r[0],object.position.y+r[1],object.position.z+r[2]});
+                }
+                if(auto wall=course_wall_from_face(face_vertices)) {
+                    if(frames.size()>1){wall->shape=int(result.size());wall->frame=int(f);}
+                    walls->push_back(*wall);
+                }
+            }
         }
         shape.planes=std::move(frames.front());
         if(animated || first_pose)shape.animated_planes=std::make_shared<const decltype(frames)>(std::move(frames));
@@ -550,6 +567,8 @@ void finish_wheel_contact(VehicleState& body, VehicleState& wheel,
         }
         if (work.flags & 2U) work.friction = 18000;
         capacity = high_multiply(wrap(capacity * 2), wrap(work.friction));
+        if(forces.rear_grip_percent!=100 && wrap(wheel.word(0x40))<0)
+            capacity=wrap(capacity*int(forces.rear_grip_percent)/100);
         if (wrap(abs_word(word(lateral_force)) - capacity) >= 0) {
             if (lateral_force < 0) capacity = wrap(-capacity);
             const auto excess = abs_word(word(lateral_force - capacity));
@@ -650,7 +669,17 @@ WheelContactWork update_wheel_contact(VehicleState& body, VehicleState& wheel,
                                     wheel.word(0x44), work.flags, wrap(wheel.word(0x3c)), skip_vertical, wall_step};
     };
     bool fallback = !candidate;
-    if (candidate) {
+    std::optional<MesaSurface> mesa;
+    if (candidate && (candidate->descriptor_address==mesa_road || candidate->descriptor_address==city_road)) {
+        const RacePosition p{wrap(wheel.word(0x1e)),wrap(wheel.word(0x20)),wrap(wheel.word(0x22))};
+        const unsigned i=candidate->command_offset-1, count=candidate->descriptor_address==mesa_road?ember_mesa.route_points:kasumi_loop.route_points;
+        mesa=custom_surface(candidate->descriptor_address,i,p);
+        // The contact list is refreshed once per phase, before both substeps.
+        if(!mesa)mesa=custom_surface(candidate->descriptor_address,(i+1)%count,p);
+        if(!mesa)mesa=custom_surface(candidate->descriptor_address,(i+count-1)%count,p);
+        fallback=!mesa || mesa->dirt;
+        if(!fallback)body.word(0x2c)&=0xffbfU;
+    } else if (candidate) {
         const auto contacts = query_collision_shape(*candidate,
             {wrap(wheel.word(0x1e)), wrap(wheel.word(0x20)), wrap(wheel.word(0x22))});
         const bool hit = std::any_of(contacts.begin(), contacts.end(), [](const auto& c) {
@@ -690,7 +719,7 @@ WheelContactWork update_wheel_contact(VehicleState& body, VehicleState& wheel,
                                   (surface & 0x40U) ? 0x1040U : (surface & 2U) ? 0x840U : 0x60U;
         wheel.word(0x2c) |= flag;
     }
-    auto ground_distance = wrap(wheel.word(0x20));
+    auto ground_distance = wrap(wheel.word(0x20) - (mesa ? mesa->y : 0));
     if (ground_distance >= 0) {
         if (wheel.word(0x2c) & 0x20U) {
             const auto ripple = word(divide_power(wrap(wheel.word(0x1e) + wheel.word(0x22)), 3)) & 15U;
@@ -698,7 +727,7 @@ WheelContactWork update_wheel_contact(VehicleState& body, VehicleState& wheel,
         }
         if (ground_distance >= 0) {
             ContactManifold ground{};
-            ground[0] = {1, ground_distance, {0, wrap(0x8100), 0}};
+            ground[0] = {1, ground_distance, mesa ? mesa->normal : RacePosition{0, wrap(0x8100), 0}};
             accumulate(respond_to_contacts(ground, 0, response_input()));
         }
     }
@@ -721,9 +750,12 @@ void refresh_vehicle_contact_candidates(const Vehicle& vehicle,
         const RacePosition p{wrap(wheel.word(0x1e)), wrap(wheel.word(0x20)), wrap(wheel.word(0x22))};
         const std::array<std::uint16_t,3> extents{wheel.word(0xc), wheel.word(0xe), wheel.word(0x10)};
         for (const auto& shape : active_shapes) {
-            if (!(wheel.word(0x1a) & shape.object_flags) &&
-                collision_bounds_overlap(p, extents, shape.position, shape.extents))
-                overlaps.push_back(shape.command_offset);
+            if ((wheel.word(0x1a) & shape.object_flags) ||
+                !collision_bounds_overlap(p, extents, shape.position, shape.extents)) continue;
+            // Adjacent mesa strips have overlapping boxes at bends. Only the
+            // strip containing this wheel may select the pavement material.
+            if ((shape.descriptor_address==mesa_road || shape.descriptor_address==city_road) && !custom_surface(shape.descriptor_address,shape.command_offset-1,p)) continue;
+            overlaps.push_back(shape.command_offset);
         }
         update_contact_candidates(candidates[i], overlaps);
     }

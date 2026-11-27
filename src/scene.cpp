@@ -1,4 +1,5 @@
 #include "srf/scene.hpp"
+#include "srf/custom_content.hpp"
 #include <sstream>
 #include <stdexcept>
 
@@ -85,6 +86,8 @@ Scene extract_easy_ride(const Rom& rom) {
     return extract_course_scene(rom,CourseId::easy_ride);
 }
 Scene extract_course_scene(const Rom& rom, CourseId id) {
+    if(id==CourseId::kasumi_loop)return kasumi_scene();
+    if(id==CourseId::ember_mesa)return mesa_scene();
     const auto& course=course_definition(id);
     auto scene=extract_scene(rom,course.scene_offset);
     if(scene.coordinate_offset!=course.coordinate_offset || scene.points.size()!=course.route_points)

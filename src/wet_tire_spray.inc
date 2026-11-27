@@ -6,8 +6,10 @@ class WetTireSpray {
         float born, strength, seed;
     };
     std::vector<Puff> puffs;
+    float tire_scale=1.f;
     static constexpr float lifetime=5.f; // native phases
 
+public:
     static bool grounded(const srf::VehicleState& wheel) {
         return (wheel.word(0x46)&0x210)==0x10; // loaded contact, visible wheel
     }
@@ -15,7 +17,9 @@ class WetTireSpray {
         const auto sum=std::uint16_t(wheel.word(0x1e + 2*axis)+wheel.word(0x4a + 2*axis));
         return float(std::bit_cast<std::int16_t>(sum));
     }
-public:
+    WetTireSpray()=default;
+    explicit WetTireSpray(unsigned tire_diameter)
+        :tire_scale(float(tire_diameter)/192.f) {} // Reference 4WD tire diameter.
     void begin_phase(unsigned phase) {
         if(phase<=1)puffs.clear();
         std::erase_if(puffs,[&](const Puff& p){return float(phase)-p.born>=lifetime+1;});
@@ -24,7 +28,7 @@ public:
         // Route-only rivals have no live contact patches.
         if(car.body.word(0x16)&0x400)return;
         const float speed=std::abs(int(std::bit_cast<std::int16_t>(car.body.word(0x4a))));
-        const float strength=std::clamp((speed-24)/370.f,0.f,1.f);
+        const float strength=std::clamp(tire_scale*(speed-24)/370.f,0.f,1.f);
         if(strength==0)return;
         for(unsigned j=0;j<car.wheels.size();++j) {
             const auto& w=car.wheels[j];
@@ -59,9 +63,9 @@ public:
             if(t<0 || t>=1)continue;
             auto location=p.position;
             for(unsigned a=0;a<3;++a)location[a]+=p.drift[a]*age;
-            location[1]-=t*(40+72*p.strength);
+            location[1]-=tire_scale*t*(40+72*p.strength);
             const auto c=normalize(location);
-            const float radius=unit*(35+112*t)*(.55f+.65f*p.strength);
+            const float radius=unit*tire_scale*(35+112*t)*(.55f+.65f*p.strength);
             const float opacity=.40f*p.strength*(1-t)*(1-t);
             std::array<GpuVertex,4> quad;
             for(unsigned i=0;i<4;++i) {

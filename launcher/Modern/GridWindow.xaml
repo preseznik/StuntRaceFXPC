@@ -1,0 +1,283 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework" x:Class="StuntRaceFX.Launcher.Modern.GridWindow" x:ClassModifier="internal" Title="Stunt Race FX PC" Width="1120" Height="610" MinWidth="790" MinHeight="510" WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" FontSize="15" Background="{DynamicResource Base}" Foreground="{DynamicResource Ink}" UseLayoutRounding="True">
+  <shell:WindowChrome.WindowChrome>
+    <shell:WindowChrome CaptionHeight="44" ResizeBorderThickness="6" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
+  </shell:WindowChrome.WindowChrome>
+  <Window.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="Paddock.xaml"/>
+      </ResourceDictionary.MergedDictionaries>
+      <DataTemplate x:Key="CourseTile">
+        <StackPanel>
+          <Grid Height="133" ClipToBounds="True" Background="#38393C">
+            <TextBlock Text="Preview unavailable" HorizontalAlignment="Center" FontSize="12"/>
+            <Image Source="{Binding Picture}" Stretch="UniformToFill"/>
+          </Grid>
+          <TextBlock Text="{Binding Name}" Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" HorizontalAlignment="Center" Margin="2,6" FontWeight="Bold"/>
+        </StackPanel>
+      </DataTemplate>
+    </ResourceDictionary>
+  </Window.Resources>
+  <Grid x:Name="Root" Background="{DynamicResource Base}">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition x:Name="NavRailWidth" Width="0"/>
+      <ColumnDefinition/>
+    </Grid.ColumnDefinitions>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="46"/>
+      <RowDefinition x:Name="TopNavHeight" Height="0"/>
+      <RowDefinition/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition x:Name="BottomNavHeight" Height="54"/>
+    </Grid.RowDefinitions>
+    <Border Grid.ColumnSpan="2" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource Line}" Background="{DynamicResource Surface}">
+      <DockPanel Margin="20,0,0,0">
+        <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" shell:WindowChrome.IsHitTestVisibleInChrome="True">
+          <Button AutomationProperties.Name="Minimize" Click="Minimize" Content="─" Style="{StaticResource Nav}"/>
+          <Button x:Name="MaximizeButton" AutomationProperties.Name="Maximize or restore" Click="Maximize" Content="□" Style="{StaticResource Nav}"/>
+          <Button AutomationProperties.Name="Close launcher" Click="Exit" Content="×" Style="{StaticResource Nav}"/>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Path Fill="{DynamicResource Gold}" Data="M0,16 L12,1 24,16 Z M19,8 L24,1 36,16 26,16 Z"/>
+          <TextBlock Text="Stunt Race FX PC" FontFamily="Bahnschrift SemiCondensed, Segoe UI" FontWeight="Bold" FontSize="20" Margin="12,0"/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
+    <Grid x:Name="Home" Grid.Row="2" Grid.Column="1" ClipToBounds="True">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="65*"/>
+        <ColumnDefinition Width="35*"/>
+      </Grid.ColumnDefinitions>
+      <Grid Grid.ColumnSpan="2">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="69*"/>
+          <ColumnDefinition Width="31*"/>
+        </Grid.ColumnDefinitions>
+        <Border Background="#303339">
+          <TextBlock Text="Course capture unavailable" HorizontalAlignment="Center" Margin="0,0,60,0"/>
+        </Border>
+        <Image x:Name="Hero" Stretch="UniformToFill" RenderOptions.BitmapScalingMode="HighQuality"/>
+        <Path Grid.ColumnSpan="2" Data="M .69,0 L1,0 1,1 .53,1 Z" Fill="{DynamicResource Base}" Stretch="Fill" HorizontalAlignment="Right" Width="{Binding ActualWidth,ElementName=WedgeBounds}"/>
+      </Grid>
+      <Grid Grid.ColumnSpan="2" IsHitTestVisible="False">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="53*"/>
+          <ColumnDefinition Width="47*"/>
+        </Grid.ColumnDefinitions>
+        <Border x:Name="WedgeBounds" Grid.Column="1"/>
+      </Grid>
+      <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="8,8,30,8">
+        <Viewbox StretchDirection="DownOnly" HorizontalAlignment="Left">
+          <TextBlock x:Name="ModeTitle" Text="QUICK RACE" FontSize="62" FontStyle="Italic" FontFamily="/StuntRaceFX.Launcher;component/Modern/Fonts/#Barlow Condensed" FontWeight="Bold"/>
+        </Viewbox>
+        <TextBlock x:Name="RaceName" FontFamily="Bahnschrift SemiCondensed, Segoe UI" FontStyle="Italic" FontWeight="Bold" FontSize="22" TextWrapping="Wrap" Margin="0,7,0,0"/>
+        <TextBlock x:Name="DisplaySummary" Foreground="{DynamicResource Muted}" FontFamily="Bahnschrift SemiCondensed, Segoe UI" FontStyle="Italic" FontSize="19" Margin="0,3,0,23"/>
+        <Button x:Name="Start" AutomationProperties.AutomationId="StartRace" Style="{StaticResource HeroButton}" Background="{DynamicResource Orange}" Foreground="{DynamicResource OnAccent}" BorderThickness="0" Click="StartGame" Content="START RACE"/>
+        <Button x:Name="SetupButton" AutomationProperties.AutomationId="ChangeSetup" Style="{StaticResource HeroButton}" Click="OpenSetup" Content="CHANGE SETUP" Margin="0,9,0,0"/>
+        <Button x:Name="HeroGraphics" Content="Graphics" Click="OpenGraphics" Margin="0,8,0,0"/>
+        <Button x:Name="Repair" Content="Open game files" Click="OpenFiles" Margin="0,8,0,0" Visibility="Collapsed"/>
+      </StackPanel>
+    </Grid>
+    <Grid x:Name="Setup" Visibility="Collapsed" Grid.Row="2" Grid.Column="1" Margin="22,18,22,10">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="270"/>
+      </Grid.ColumnDefinitions>
+      <Grid.RowDefinitions><RowDefinition/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <DockPanel x:Name="CatalogPane" Margin="0,0,20,0" Grid.RowSpan="2">
+        <TextBlock x:Name="CatalogTitle" DockPanel.Dock="Top" Style="{StaticResource Heading}" Text="Course Atlas"/>
+        <StackPanel x:Name="DeskModeBar" DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,12">
+          <RadioButton x:Name="DeskFull" Content="Full game" Style="{StaticResource ModeTab}" Checked="DeskModeChanged"/>
+          <RadioButton x:Name="DeskQuick" Content="Quick Race" Style="{StaticResource ModeTab}" Checked="DeskModeChanged"/>
+        </StackPanel>
+        <Grid>
+          <ListBox x:Name="Tiles" Tag="3" AutomationProperties.Name="Courses" ItemTemplate="{StaticResource CourseTile}" SelectionChanged="TileChanged">
+            <ListBox.ItemsPanel>
+              <ItemsPanelTemplate>
+                <UniformGrid Columns="{Binding Tag,RelativeSource={RelativeSource AncestorType=ListBox}}"/>
+              </ItemsPanelTemplate>
+            </ListBox.ItemsPanel>
+          </ListBox>
+          <Border x:Name="DeskPreview" Style="{StaticResource Card}" Padding="0" ClipToBounds="True">
+            <DockPanel>
+              <StackPanel DockPanel.Dock="Bottom" Margin="16,10">
+                <TextBlock Text="{Binding Text,ElementName=RaceName}" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <TextBlock Text="{Binding Text,ElementName=DisplaySummary}" Style="{StaticResource Caption}"/>
+              </StackPanel>
+              <Grid Background="{DynamicResource Field}" ClipToBounds="True">
+                <TextBlock Text="Course capture unavailable" HorizontalAlignment="Center" TextWrapping="Wrap"/>
+                <Image Source="{Binding Source,ElementName=Hero}" Stretch="UniformToFill"/>
+              </Grid>
+            </DockPanel>
+          </Border>
+          <DockPanel x:Name="FullHint">
+            <TextBlock DockPanel.Dock="Bottom" Style="{StaticResource Caption}" Text="Start at the title screen and choose an event in-game."/>
+            <Image x:Name="BootArt" Stretch="Uniform"/>
+          </DockPanel>
+        </Grid>
+      </DockPanel>
+      <StackPanel x:Name="InlineActions" Grid.Row="1" Grid.Column="1" Margin="0,10,8,0">
+        <Button x:Name="InlineRepair" Content="Open game files" Click="OpenFiles" Margin="0,0,0,4" Visibility="{Binding Visibility,ElementName=Repair}"/>
+        <DockPanel>
+          <Button x:Name="InlineGraphics" DockPanel.Dock="Right" Content="Graphics" Click="OpenGraphics" Margin="8,0,0,0"/>
+          <Button x:Name="InlineStart" Content="{Binding Content,ElementName=Start}" IsEnabled="{Binding IsEnabled,ElementName=Start}" Click="StartGame" Style="{StaticResource Primary}"/>
+        </DockPanel>
+      </StackPanel>
+      <DockPanel x:Name="FieldPane" Grid.Column="1">
+        <Button x:Name="ApplySetup" DockPanel.Dock="Bottom" Content="Use setup" Margin="0,10,8,0" Click="OpenHome" Style="{StaticResource Primary}"/>
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="0,0,8,0">
+            <TextBlock x:Name="SetupTitle" Text="Race setup" TextTrimming="CharacterEllipsis" Style="{StaticResource Heading}"/>
+            <TextBlock x:Name="ModeLabel" Text="Launch mode" Style="{StaticResource Caption}"/>
+            <ComboBox x:Name="ModeChoice" AutomationProperties.Name="Launch mode"/>
+            <StackPanel x:Name="DeskCourseField">
+              <TextBlock Text="Course" Style="{StaticResource Caption}"/>
+              <ComboBox x:Name="DeskCourse" DisplayMemberPath="Name" SelectedValuePath="Id" AutomationProperties.Name="Course" SelectionChanged="DeskCourseChanged"/>
+              <Button Content="Browse courses" Click="OpenSetup" Margin="0,5,0,2"/>
+            </StackPanel>
+            <TextBlock Text="Display" Style="{StaticResource Caption}"/>
+            <ComboBox x:Name="DisplayChoice" AutomationProperties.Name="Display"/>
+            <TextBlock x:Name="CarLabel" Text="Vehicle" Style="{StaticResource Caption}"/>
+            <ComboBox x:Name="CarChoice" AutomationProperties.Name="Vehicle"/>
+            <TextBlock Text="Visual style" Style="{StaticResource Caption}"/>
+            <ComboBox x:Name="StyleChoice" AutomationProperties.Name="Visual style"/>
+            <StackPanel x:Name="Conditions">
+              <TextBlock Text="Weather" Style="{StaticResource Caption}"/>
+              <ComboBox x:Name="WeatherChoice" AutomationProperties.Name="Weather"/>
+              <TextBlock Text="Track time" Style="{StaticResource Caption}"/>
+              <ComboBox x:Name="HourChoice" AutomationProperties.Name="Track time"/>
+            </StackPanel>
+          </StackPanel>
+        </ScrollViewer>
+      </DockPanel>
+    </Grid>
+    <Grid x:Name="Network" Visibility="Collapsed" Grid.Row="2" Grid.Column="1" Margin="24,18,24,8">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="1.25*"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition/>
+      </Grid.RowDefinitions>
+      <TextBlock Grid.ColumnSpan="2" x:Name="NetworkTitle" Text="Find a lobby" Style="{StaticResource Heading}"/>
+      <DockPanel Grid.Row="1" Margin="0,0,16,0">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="LobbyBoard">
+            <Border Style="{StaticResource Card}" x:Name="FindCard">
+              <StackPanel>
+                <DockPanel>
+                  <Button x:Name="Scan" Content="Refresh" Click="ScanClick" DockPanel.Dock="Right"/>
+                  <TextBlock Text="Local network" FontSize="20" FontWeight="Bold"/>
+                </DockPanel>
+                <TextBlock x:Name="ScanLabel" Style="{StaticResource Caption}"/>
+                <ListBox x:Name="Servers" SelectionChanged="ServerSelected" MaxHeight="125"/>
+                <TextBlock Text="Host address" Style="{StaticResource Caption}"/>
+                <TextBox x:Name="Address" AutomationProperties.Name="Host address"/>
+                <Button x:Name="Join" Click="JoinClick" Content="Join lobby" Style="{StaticResource Primary}" Margin="0,10,0,0"/>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource Card}" x:Name="RosterCard" Visibility="Collapsed">
+              <StackPanel>
+                <TextBlock Text="Starting grid" FontSize="20" FontWeight="Bold"/>
+                <ItemsControl x:Name="Roster" Margin="0,9">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Grid Margin="0,4">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="28"/>
+                          <ColumnDefinition/>
+                          <ColumnDefinition Width="76"/>
+                          <ColumnDefinition Width="83"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding Number}" Foreground="{DynamicResource Gold}"/>
+                        <TextBlock Grid.Column="1" Text="{Binding Driver}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Driver}"/>
+                        <TextBlock Grid.Column="2" Text="{Binding Car}"/>
+                        <TextBlock Grid.Column="3" Text="{Binding Status}" HorizontalAlignment="Right"/>
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock x:Name="Waiting" TextWrapping="Wrap" Style="{StaticResource Caption}"/>
+                <WrapPanel>
+                  <Button x:Name="Ready" Click="ReadyClick" Content="Ready" Margin="0,0,6,6"/>
+                  <Button x:Name="Go" Click="GoClick" Style="{StaticResource Primary}" Content="Start race" Margin="0,0,6,6"/>
+                  <Button x:Name="Force" Click="HostActions" Content="Host actions ▾" Margin="0,0,6,6">
+                    <Button.ContextMenu>
+                      <ContextMenu Background="{DynamicResource Surface}" Foreground="{DynamicResource Ink}">
+                        <MenuItem Header="Force start with available drivers" Click="ForceClick"/>
+                      </ContextMenu>
+                    </Button.ContextMenu>
+                  </Button>
+                  <Button Click="LeaveClick" Content="Leave lobby" Margin="0,0,0,6"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
+            <Border x:Name="ChatCard" Visibility="Collapsed" Style="{StaticResource Card}">
+              <StackPanel>
+                <TextBlock Text="Lobby chat" FontWeight="Bold" FontSize="18"/>
+                <ListBox x:Name="Chat" Height="84" Focusable="False"/>
+                <DockPanel>
+                  <Button DockPanel.Dock="Right" Content="Send" Click="SendClick" Margin="6,0,0,0"/>
+                  <TextBox x:Name="Message" AutomationProperties.Name="Chat message" MaxLength="256" KeyDown="ChatKey"/>
+                </DockPanel>
+              </StackPanel>
+            </Border>
+            <Border x:Name="NetworkPreview" Style="{StaticResource Card}">
+              <StackPanel>
+                <TextBlock x:Name="PreviewCaption" FontWeight="Bold" Margin="0,0,0,8"/>
+                <Image x:Name="LobbyPhoto" Height="124" Stretch="UniformToFill" ClipToBounds="True"/>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </DockPanel>
+      <ScrollViewer Grid.Column="1" Grid.Row="1" VerticalScrollBarVisibility="Auto">
+        <StackPanel x:Name="DriverPanel">
+          <Border Style="{StaticResource Card}">
+            <StackPanel>
+              <TextBlock Text="Your driver" FontWeight="Bold" FontSize="20"/>
+              <TextBlock Text="Driver name" Style="{StaticResource Caption}"/>
+              <TextBox x:Name="DriverName" AutomationProperties.Name="Driver name" MaxLength="32"/>
+              <TextBlock Text="Your car" Style="{StaticResource Caption}"/>
+              <ComboBox x:Name="LanCar" AutomationProperties.Name="Your car"/>
+              <TextBlock Text="Your visual style" Style="{StaticResource Caption}"/>
+              <ComboBox x:Name="LanStyle" AutomationProperties.Name="Your visual style"/>
+            </StackPanel>
+          </Border>
+          <Border x:Name="HostCard" Style="{StaticResource Card}">
+            <StackPanel>
+              <TextBlock Text="Host a lobby" FontWeight="Bold" FontSize="20"/>
+              <TextBlock Text="Driver seats" Style="{StaticResource Caption}"/>
+              <ComboBox x:Name="Seats" AutomationProperties.Name="Driver seats"/>
+              <Button x:Name="Host" Click="HostClick" Content="Host lobby" Margin="0,10,0,0"/>
+            </StackPanel>
+          </Border>
+          <StackPanel x:Name="HostCourse">
+            <TextBlock Text="Course" Style="{StaticResource Caption}"/>
+            <ComboBox x:Name="LanCourse" AutomationProperties.Name="Host course"/>
+          </StackPanel>
+        </StackPanel>
+      </ScrollViewer>
+    </Grid>
+    <DockPanel x:Name="Options" Visibility="Collapsed" Grid.Row="2" Grid.Column="1" Margin="24,18,24,8">
+      <StackPanel x:Name="SettingsSections" DockPanel.Dock="Left" Width="175" Margin="0,0,16,0">
+        <TextBlock Text="Settings" Style="{StaticResource Heading}"/>
+        <WrapPanel x:Name="SettingsRail" Orientation="Vertical"/>
+      </StackPanel>
+      <ScrollViewer x:Name="SettingsScroll" VerticalScrollBarVisibility="Auto">
+        <StackPanel x:Name="SettingsBody" Margin="6,3,12,6"/>
+      </ScrollViewer>
+    </DockPanel>
+    <Border x:Name="NoticeBar" Grid.Row="3" Grid.Column="1" Background="{DynamicResource Surface}" Padding="18,7" Visibility="Collapsed">
+      <TextBlock x:Name="Notice" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+    </Border>
+    <Border x:Name="NavBar" Grid.Row="4" Grid.ColumnSpan="2" Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0">
+      <StackPanel x:Name="NavItems" Orientation="Horizontal" Margin="14,4">
+        <Button x:Name="PlayNav" Click="OpenHome" Style="{StaticResource Nav}" Content="PLAY"/>
+        <Button x:Name="LanNav" Click="OpenNetwork" Style="{StaticResource Nav}" Content="MULTIPLAYER"/>
+        <Button x:Name="SettingsNav" Click="OpenOptions" Style="{StaticResource Nav}" Content="SETTINGS"/>
+      </StackPanel>
+    </Border>
+  </Grid>
+</Window>

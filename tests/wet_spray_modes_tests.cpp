@@ -27,7 +27,7 @@ void compare(Renderer& renderer,const std::filesystem::path& output,const std::s
         unsigned changed=0;
         for(auto p=view*(on.size()/views);p<(view+1)*(on.size()/views);p+=4)
             if(std::abs(int(on[p])-off[p])>4)++changed;
-        if(wet && changed<100)throw std::runtime_error(name+" has no visible spray in view "+std::to_string(view));
+        if(wet && changed<100)throw std::runtime_error(name+" has no visible spray in view "+std::to_string(view)+" ("+std::to_string(changed)+" pixels)");
         // Hardware MSAA can resolve a few coplanar edge samples differently
         // on repeated dry draws. A visible trail covers hundreds of pixels.
         if(!wet && changed>8)throw std::runtime_error(name+" changed "+std::to_string(changed)+" pixels in clear weather");
@@ -113,9 +113,120 @@ void local(Renderer& renderer,const Rom& rom,LocalCourse course,const std::files
     });
 }
 
+void drift_effects(const Rom& rom,const std::filesystem::path& output) {
+    LocalRace race(rom,practice_course,PlayerCar::four_wd,PlayerCar::coupe,false,{},DrivingPhysics::enhanced);
+    const auto world=extract_world(rom,race.scene());
+    DriftTrails trails(world,CourseId::easy_ride);
+    const auto step=[&](std::uint16_t buttons) {
+        const auto before=race.car(0);
+        race.step({buttons});
+        trails.begin_phase(race.phase());
+        trails.emit(race.phase(),0,before,race.car(0));
+    };
+    for(unsigned i=0;i<16;++i)step(0x10);
+    for(unsigned i=0;i<10;++i)step(0x11|drift_button);
+    const auto car=pose(rom,race.car(0));
+    for(auto look:{RaceLook::classic,RaceLook::n64,RaceLook::remastered}) {
+        RaceGraphics graphics{};graphics.look=look;graphics.drift_effects=true;
+        Renderer renderer(nullptr,nullptr,0,graphics);
+        renderer.select_course({});
+        generated::CoursePackage colors{};colors.day_palette=colors.dusk_palette=extract_local_palette(rom,practice_course.index);
+        renderer.set_course_colors(colors);renderer.load_textures(extract_local_sprites(rom,practice_course.index));
+        renderer.load_backdrop(extract_local_backdrop(rom,practice_course.index));
+        renderer.load_world(world,0);aim(renderer,car,race.car(0));
+        renderer.load_world(world,0,std::span(&car,1),&rom);
+        renderer.render();const auto clean=renderer.readback_bgra();
+        renderer.load_drift(trails,race.phase());renderer.render();
+        const auto smoking=renderer.readback_bgra();
+        if(!output.empty())renderer.screenshot(output/("drift-"+std::to_string(int(look))+".png"));
+        renderer.load_drift(trails,race.phase()+8);renderer.render();
+        const auto marks=renderer.readback_bgra();
+        unsigned darkened=0,smoke=0;
+        for(std::size_t i=0;i<marks.size();i+=4) {
+            if(int(clean[i])-marks[i]>8)++darkened;
+            if(std::abs(int(smoking[i])-marks[i])>4)++smoke;
+        }
+        std::cout<<"Drift style "<<int(look)<<": "<<darkened<<" skid and "<<smoke<<" smoke pixels\n";
+        if(darkened<80 || smoke<12)throw std::runtime_error("Drift marks or smoke missing from dry practice");
+        renderer.load_drift(trails,race.phase()+85);renderer.render();
+        if(renderer.readback_bgra()!=clean)throw std::runtime_error("Expired drift left a trail");
+    }
+}
+
+void drift_sparks(const Rom& rom,const std::filesystem::path& output) {
+    LocalRace race(rom,practice_course,PlayerCar::four_wd,PlayerCar::coupe,false,{},DrivingPhysics::enhanced);
+    const auto world=extract_world(rom,race.scene());
+    for(auto look:{RaceLook::classic,RaceLook::n64,RaceLook::remastered}) {
+        RaceGraphics graphics{};graphics.look=look;graphics.low_raster=look!=RaceLook::remastered;graphics.drift_effects=true;
+        Renderer renderer(nullptr,nullptr,0,graphics);
+        generated::CoursePackage colors{};colors.day_palette=colors.dusk_palette=extract_local_palette(rom,practice_course.index);
+        renderer.set_course_colors(colors);renderer.load_textures(extract_local_sprites(rom,practice_course.index));
+        renderer.load_backdrop(extract_local_backdrop(rom,practice_course.index));
+        race.reset();
+        DriftTrails trails(world,CourseId::easy_ride),without_sparks(world,CourseId::easy_ride);
+        while(race.phase()<100 && std::int16_t(race.car(0).body.word(0x4a))<135)race.step({0x10});
+        for(unsigned tick=1;tick<=29;++tick) {
+            auto before=race.car(0);
+            race.step({std::uint16_t(0x10|(tick<=28?drift_button:0))},{(tick/5)%2?12000:-12000});
+            const auto& car=race.car(0);
+            auto plain=car;plain.drift_charge_ticks=0;
+            const auto phase=race.phase();
+            trails.begin_phase(phase);trails.emit(phase,0,before,car);
+            without_sparks.begin_phase(phase);without_sparks.emit(phase,0,before,plain);
+            if(tick!=9 && tick!=10 && tick!=27 && tick!=28 && tick!=29)continue;
+            const auto vehicle=pose(rom,car);
+            renderer.load_world(world,0,std::span(&vehicle,1),&rom);aim(renderer,vehicle,car);
+            renderer.load_drift(without_sparks,phase);renderer.render();const auto base=renderer.readback_bgra();
+            renderer.load_drift(trails,phase);renderer.render();const auto pixels=renderer.readback_bgra();
+            unsigned cyan[2]{},gold[2]{};
+            for(std::size_t i=0;i<pixels.size();i+=4) {
+                if(std::max(std::abs(int(pixels[i])-base[i]),std::abs(int(pixels[i+2])-base[i+2]))<40)continue;
+                const auto side=i/4%controls.width>=controls.width/2;
+                if(pixels[i]>pixels[i+2]+48 && pixels[i+1]>110)++cyan[side];
+                if(pixels[i+2]>pixels[i]+48 && pixels[i+1]>90)++gold[side];
+            }
+            if((tick>=10 && tick<28 ? std::min(cyan[0],cyan[1])<8 : cyan[0]+cyan[1]>0) ||
+               (tick==28 ? std::min(gold[0],gold[1])<8 : gold[0]+gold[1]>0))
+                throw std::runtime_error("Wrong drift spark color or missing rear tire at tick "+std::to_string(tick)+
+                    " style "+std::to_string(int(look))+" cyan "+std::to_string(cyan[0])+"/"+std::to_string(cyan[1])+
+                    " gold "+std::to_string(gold[0])+"/"+std::to_string(gold[1]));
+            if(!output.empty() && (tick==10 || tick==28))
+                renderer.screenshot(output/("sparks-"+std::to_string(int(look))+(tick==10?"-ready.png":"-full.png")));
+        }
+    }
+}
+
+void drift_across_lane_paint(const Rom& rom) {
+    const auto course=CourseId::easy_ride;
+    const auto world=extract_world(rom,extract_course_scene(rom,course));
+    NativeRace race(rom,PlayerCar::four_wd,course,{},{},DrivingPhysics::enhanced);
+    CourseScenery scenery(rom,course);RaceAudioState audio;
+    DriftTrails trails(world,course);
+    while(race.phase()<96) {
+        const auto before=race.racers();const auto& b=before.back().body;
+        const bool turn=race.phase()>=87;
+        RaceAudioOutput events;scenery.step(b,b.word(0x7a));
+        race.step(prepare_player_input(audio,b,turn?0x11:0x410,race.countdown_active(),events),4,{},nullptr,turn);
+        trails.begin_phase(race.phase());trails.emit(race.phase(),3,before.back(),race.racers().back());
+    }
+    RaceGraphics graphics{};graphics.look=RaceLook::remastered;graphics.drift_effects=true;
+    Renderer renderer(nullptr,nullptr,0,graphics,course);
+    renderer.set_course_colors(generated::course_packages[0]);
+    renderer.load_textures(extract_vehicle_sprites(rom,course));renderer.load_backdrop(extract_course_backdrop(rom,course));
+    renderer.load_world(world,0);
+    const auto cars=vehicle_poses(rom,race.racers(),race.racers(),race.player_index(),1);
+    aim(renderer,cars.back(),race.racers().back());
+    renderer.load_race_world(world,cars,rom,race,scenery);renderer.render();const auto clean=renderer.readback_bgra();
+    renderer.load_drift(trails,race.phase()+8);renderer.render();const auto marked=renderer.readback_bgra();
+    unsigned rubber=0;
+    for(std::size_t i=clean.size()*3/4;i<clean.size();i+=4)
+        if(std::min({clean[i],clean[i+1],clean[i+2]})>230 && clean[i]-marked[i]>60)++rubber;
+    if(rubber<100)throw std::runtime_error("Easy Ride lane paint covered the skid marks");
+}
+
 void bonus(Renderer& renderer,const Rom& rom,SpeedClass league,const std::filesystem::path& output) {
     SpeedBonus event(rom,league);
-    WetTireSpray spray;
+    WetTireSpray spray(event.truck().tire_diameters.front());
     constexpr unsigned phase=24;
     for(unsigned i=1;i<=phase;++i) {
         const auto before=event.truck();
@@ -150,6 +261,9 @@ int wmain(int argc,wchar_t** argv) {
         controls.race=controls.world=race_camera.enabled=true;
         RaceGraphics graphics{};graphics.look=RaceLook::remastered;graphics.wet_tire_spray=true;
         portals(rom);
+        drift_effects(rom,output);
+        drift_sparks(rom,output);
+        drift_across_lane_paint(rom);
         for(const bool rain:{false,true}) {
             graphics.msaa=4;
             graphics.weather=rain?RaceWeather{1,.007f,1}:RaceWeather{};

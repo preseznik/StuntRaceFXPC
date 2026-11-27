@@ -56,8 +56,8 @@ class GridCountdownArt {
     std::array<std::uint32_t,16> palette_;
 
     GridCountdownArt(const Rom& rom,CourseId course,PlayerCar car,std::size_t palette_offset)
-        :lettering_(rom,palette_offset),map_(rom,static_cast<unsigned>(course),palette_offset),
-         boost_(rom,static_cast<unsigned>(course)/4,course==CourseId::kings_forest?15:course==CourseId::white_land?10:0),
+        :lettering_(rom,palette_offset),map_(rom,course,palette_offset),
+         boost_(rom,static_cast<unsigned>(asset_course(course))/4,course==CourseId::kings_forest?15:course==CourseId::white_land?10:0),
          dash_(rom,car),tiles_(extract_bonus_hud_tiles(rom)),
          signal_(extract_start_light_tiles(rom)),notices_(rom),palette_(bonus_hud_palette(rom,palette_offset)) {}
 

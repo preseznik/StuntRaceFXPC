@@ -1,3 +1,4 @@
+#include "srf/custom_content.hpp"
 #include "srf/native_race.hpp"
 
 #include <algorithm>
@@ -15,9 +16,7 @@ std::array<Word,3> extents(const VehicleState& body) {
     return {body.word(0x0c),body.word(0x0e),body.word(0x10)};
 }
 Word absolute_word(Word value) { return signed_word(value)<0?Word(0U-value):value; }
-// Original scene-command dispatch lengths, CPU08:801F. Parsing is bounded by
-// the already verified course scene, including the terminating command04.
-constexpr std::array<std::uint8_t,14> command_lengths{0,22,1,1,2,25,22,26,24,9,3,4,4,3};
+
 }
 
 CourseBridges::CourseBridges(const Rom& rom,const Scene& scene,std::span<const CollisionShape> shapes,const StreamingCourse& streaming) {
@@ -58,37 +57,26 @@ void CourseBridges::advance(const CollisionStreamState& stream,std::span<Collisi
 }
 
 NativeRace::NativeRace(const Rom& rom, PlayerCar car, CourseId course,std::optional<Word> championship_carry,
-                       std::optional<GridOrder> championship_grid)
-    : NativeRace(rom,car,course,extract_course_scene(rom,course),championship_carry,championship_grid) {}
+                       std::optional<GridOrder> championship_grid,DrivingPhysics physics)
+    : NativeRace(rom,car,course,extract_course_scene(rom,course),championship_carry,championship_grid,physics) {}
 NativeRace::NativeRace(const Rom& rom, PlayerCar car, CourseId course, const Scene& scene,
-                       std::optional<Word> championship_carry,std::optional<GridOrder> championship_grid)
-    : course_(course),championship_grid_(championship_grid),opponents_(extract_opponent_tuning(rom)),route_(extract_route(scene)),
-      shapes_(extract_collision(rom,scene)),initial_props_(extract_props(rom,scene)),
+                       std::optional<Word> championship_carry,std::optional<GridOrder> championship_grid,DrivingPhysics physics)
+    : course_(course),physics_(physics),championship_grid_(championship_grid),opponents_(extract_opponent_tuning(rom)),route_(extract_route(scene)),
+      shapes_(extract_collision(rom,scene,physics==DrivingPhysics::enhanced?&walls_:nullptr)),initial_props_(extract_props(rom,scene)),
       streaming_(extract_streaming(rom,scene)),rocks_(scene),movable_props_(rom,scene,course) {
-    const auto player_type=static_cast<std::uint8_t>(car);
+    if(physics==DrivingPhysics::enhanced)add_visible_course_walls(walls_,rom,scene);
+    const auto player_type=static_cast<std::uint8_t>(chassis(car));
     if(player_type>2)throw std::invalid_argument("Unsupported player car");
     const auto bytes=rom.bytes();
     std::array<RacePosition,4> grid{};
     std::array<Word,4> yaw{};
-    std::array<bool,4> found{};
-    for(auto cursor=scene.start_offset;cursor<scene.coordinate_offset;) {
-        const auto opcode=bytes[cursor];
-        if(opcode==4)break;
-        if((opcode&1) || opcode/2>=command_lengths.size() || !command_lengths[opcode/2])
-            throw std::runtime_error("Unsupported original grid command");
-        const auto length=command_lengths[opcode/2];
-        if(cursor+length>scene.coordinate_offset)throw std::runtime_error("Truncated original grid command");
-        if(opcode==18) {
-            const auto slot=bytes[cursor+1];
-            if(slot<1 || slot>4 || found[slot-1])throw std::runtime_error("Invalid original starting grid");
-            found[slot-1]=true;
-            for(unsigned axis=0;axis<3;++axis)grid[slot-1][axis]=signed_word(rom.u16(cursor+2+axis*2));
-            yaw[slot-1]=Word(unsigned(bytes[cursor+8])<<8);
-        } else if(opcode==20)surface_options_|=rom.u16(cursor+1);
-        cursor+=length;
+    surface_options_=scene.surface_flags;
+    for(unsigned i=0;i<scene.grid.size();++i) {
+        if(!scene.grid[i])throw std::runtime_error("Incomplete race grid");
+        const auto& slot=*scene.grid[i];
+        grid[i]={std::int16_t(slot.position.x),std::int16_t(slot.position.y),std::int16_t(slot.position.z)};
+        yaw[i]=Word(slot.orientation<<8);
     }
-    if(std::find(found.begin(),found.end(),false)!=found.end())
-        throw std::runtime_error("Incomplete original starting grid");
     constexpr GridOrder first_grid{4,3,2,1}; // CPU08:B893 in GSU linked-list order.
     const auto& slots=championship_grid_?*championship_grid_:first_grid;
     if(!std::is_permutation(slots.begin(),slots.end(),first_grid.begin()))
@@ -112,10 +100,13 @@ NativeRace::NativeRace(const Rom& rom, PlayerCar car, CourseId course, const Sce
         pose[1]=signed_word(Word(pose[1]-(player?160:480)));
         initial_[index]=create_vehicle(bytes,definition,pose,yaw[slot],player?1:4,
                                        Word(identifier),surface_options_);
+        initial_[index].custom_shell=player ? (car==PlayerCar::cargo?cargo_shell:car==PlayerCar::kestrel?kestrel_shell:0) : 0;
         auto& body=initial_[index].body;
         if(player)body.word(0x1c)|=8; // CPU08:AF55.
         else {body.word(0x64)|=8;body.word(0x40)|=0x0200;} // CPU08:B208.
         tuning_[index]=extract_vehicle_tuning(bytes,body.word(0x6e));
+        if(initial_[index].custom_shell==kestrel_shell)tune_kestrel(tuning_[index]);
+        if(initial_[index].custom_shell==cargo_shell)tune_cargo(tuning_[index]);
         wheel_tuning_[index]=extract_wheel_contact_tuning(rom,tuning_[index].contact_parameters);
     }
     clock_tuning_=championship_carry || course==CourseId::sea_breeze || course==CourseId::night_cruise || course==CourseId::lake_side || course==CourseId::big_ravine || course==CourseId::sky_ramp || course==CourseId::harbor_city
@@ -365,7 +356,7 @@ void NativeRace::refresh_candidates() {
                 overlapping[i].push_back(id);
         }
     }
-    for(std::size_t i=0;i<racers_.size();++i)for(std::size_t j=i+1;j<racers_.size();++j) {
+    for(std::size_t i=0;physics_==DrivingPhysics::original && i<racers_.size();++i)for(std::size_t j=i+1;j<racers_.size();++j) {
         const auto& a=racers_[i].body;
         const auto& b=racers_[j].body;
         if(!collision_bounds_overlap(position(a),extents(a),position(b),extents(b)))continue;
@@ -460,7 +451,7 @@ void NativeRace::acknowledge_lap() {
 }
 
 void NativeRace::step(std::uint16_t controls,std::uint8_t elapsed_clock_ticks,
-                      std::optional<std::int16_t> steering,std::array<Vehicle,4>* halfway) {
+                      std::optional<std::int16_t> steering,std::array<Vehicle,4>* halfway,bool drift_held) {
     if(halfway)*halfway=racers_;
     if(ended())return;
     const bool held=countdown_active();
@@ -492,7 +483,10 @@ void NativeRace::step(std::uint16_t controls,std::uint8_t elapsed_clock_ticks,
         failure_=race_failure(player.word(0x40));
     }
     if(failure_!=RaceFailure::none)return;
-    if(time_over_pending())controls&=0xfbcf; // Keep steering and the service brake.
+    if(time_over_pending()) {
+        controls&=0xfbcf; // Keep steering and the service brake.
+        racers_[player_index()].drift_charge_ticks=0;
+    }
     if(spray_)spray_->step(racers_);
     for(std::size_t i=0;i<player_index();++i) {
         auto& flags=racers_[i].body.word(0x70);
@@ -530,6 +524,10 @@ void NativeRace::step(std::uint16_t controls,std::uint8_t elapsed_clock_ticks,
         // list. Their keepalive is cleared before the body sets it again.
         for(auto& wheel:racers_[i].wheels)wheel.word(0x1c)&=Word(~4U);
         VehicleStepEnvironment environment{};
+        environment.physics=physics_;
+        environment.walls=walls_;
+        environment.course_shapes=shapes_;
+        environment.kasumi_walls=course_==CourseId::kasumi_loop;
         environment.route=route_;
         environment.racers=participants;
         environment.body_candidates=body_candidates_[i];
@@ -538,7 +536,10 @@ void NativeRace::step(std::uint16_t controls,std::uint8_t elapsed_clock_ticks,
         environment.wheel_candidate_lists=&wheel_candidates_[i];
         environment.frozen=frozen_!=0;
         if(i==player_index() && !held && !(racers_[i].body.word(0x1c)&0x10) &&
-           !(racers_[i].body.word(0x42)&0x1000))environment.steering_q15=steering;
+           !(racers_[i].body.word(0x42)&0x1000)) {
+            environment.steering_q15=steering;
+            environment.drift_held=drift_held && !time_over_pending();
+        }
         for(std::size_t wheel=0;wheel<4;++wheel)if(!wheel_candidates_[i][wheel].empty()) {
             const auto id=wheel_candidates_[i][wheel].front();
             const auto candidate=std::find_if(active_shapes_.begin(),active_shapes_.end(),
@@ -557,6 +558,9 @@ void NativeRace::step(std::uint16_t controls,std::uint8_t elapsed_clock_ticks,
         racers_[i].body.word(0x1c)&=Word(~4U);
         if(!racers_[i].body.word(0x18))body_candidate_ids_[i].clear();
     }
+    if(physics_==DrivingPhysics::enhanced && !frozen_)
+        resolve_racer_contacts(racers_,cpu_positions_,tuning_,walls_,shapes_,
+                               halfway?std::span<Vehicle>(*halfway):std::span<Vehicle>{});
     update_standings();
     // CPU07:E5D9 dispatches damage failure before CPU07:E6A8 can acknowledge a lap.
     if(!pending && !time_over_pending() && race_failure(player.word(0x40))==RaceFailure::none)

@@ -36,6 +36,7 @@ struct Scene {
     std::vector<ScenePoint> points;
     std::uint16_t surface_flags{};
     std::array<std::optional<GridSlot>,4> grid{};
+    std::optional<CourseId> authored{};
 };
 
 Scene extract_easy_ride(const Rom& rom);

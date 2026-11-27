@@ -245,6 +245,19 @@ int wmain(int argc,wchar_t** argv) {
             pad.neutral();pad.axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,32767);require(input.poll(true).requested==0x10,"Right trigger throttle");
             pad.neutral();pad.axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER,32767);require(input.poll(true).requested==0x40,"Left trigger brake");
             pad.neutral();pad.button(SDL_GAMEPAD_BUTTON_WEST,true);require(input.poll(true).requested==0x400,"Boost button");
+            pad.neutral();pad.button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,true);
+            srf::DriftInput drift;
+            drift.sample(input.poll(true).requested,true);
+            pad.neutral();drift.sample(input.poll(true).requested,true);
+            require(drift.consume(0x11)==(0x11|srf::drift_button),"Short drift tap lost between ticks");
+            drift.sample(srf::drift_button,true);
+            require(drift.consume(0)==srf::drift_button,"Second drift tap lost");
+            drift.sample(srf::drift_button,true);
+            require(drift.consume(srf::drift_button)==srf::drift_button,"Held drift was released between ticks");
+            drift.sample(srf::drift_button,true);drift.sample(0,true);
+            require(drift.consume(0)==0,"Release extended a previously consumed drift press");
+            drift.sample(0,true);drift.sample(srf::drift_button,true);drift.sample(0,false);
+            require(drift.consume(0)==0,"Paused drift tap leaked into next tick");
             pad.neutral();pad.button(SDL_GAMEPAD_BUTTON_START,true);require(input.poll(true).pause,"Pause rising edge");
             require(!input.poll(true).pause,"Held pause must not toggle repeatedly");
             pad.neutral();input.poll(true);pad.button(SDL_GAMEPAD_BUTTON_BACK,true);require(input.poll(true).restart,"Restart rising edge");
@@ -263,10 +276,12 @@ int wmain(int argc,wchar_t** argv) {
         const auto config=std::filesystem::temp_directory_path()/("srf-controller-regression-"+std::to_string(GetCurrentProcessId())+".ini");
         // Exclusive evidence/test path avoids overwriting user files.
         require(!std::filesystem::exists(config),"Test config already exists");
-        {std::ofstream file(config);file<<"# remap\naccelerate=NORTH\nbrake=south\nboost=east\naccelerate_axis=none\nbrake_axis=none\nsteering_axis=rightx\ndeadzone=12000\n";}
+        {std::ofstream file(config);file<<"# remap\naccelerate=NORTH\nbrake=south\nboost=east\n# drift=leftshoulder\naccelerate_axis=none\nbrake_axis=none\nsteering_axis=rightx\ndeadzone=12000\n";}
         {
             srf::Gamepad input(config);VirtualPad pad;input.poll(true);
             pad.button(SDL_GAMEPAD_BUTTON_NORTH,true);require(input.poll(true).requested==0x10,"Remapped north acceleration");
+            pad.neutral();pad.button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,true);
+            require(input.poll(true).requested==srf::drift_button,"Remapped drift");
             pad.neutral();pad.button(SDL_GAMEPAD_BUTTON_SOUTH,true);require(input.poll(true).requested==0x40,"Remapped south brake");
             pad.neutral();pad.axis(SDL_GAMEPAD_AXIS_LEFTX,32767);require(input.poll(true).requested==0,"Disabled old steering axis");
             pad.axis(SDL_GAMEPAD_AXIS_RIGHTX,12000);require(input.poll(true).requested==2,"Remapped steering axis and threshold");

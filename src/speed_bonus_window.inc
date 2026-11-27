@@ -115,7 +115,7 @@ static std::optional<BonusFinish> play_speed_bonus(GameHost& host,const Rom& rom
     const auto world=extract_world(rom,event.scene());
     const int grounded_y=signed_word(event.truck().body.word(0x20))+98;
     bool settling=true;
-    WetTireSpray spray;
+    WetTireSpray spray(event.truck().tire_diameters.front());
     unsigned phase=0;
     BonusWindowState state;
 

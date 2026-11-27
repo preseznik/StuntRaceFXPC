@@ -41,11 +41,6 @@ int wmain(int argc,wchar_t** argv) {
         GameHost host;host.open(false,graphics);
         const auto window=host.window;
         ShowWindow(window,SW_SHOW);
-        const auto foreground=GetWindowThreadProcessId(GetForegroundWindow(),nullptr);
-        const auto self=GetCurrentThreadId();
-        const bool attached=foreground && foreground!=self && AttachThreadInput(self,foreground,TRUE);
-        SetForegroundWindow(window);SetFocus(window);
-        if(attached)AttachThreadInput(self,foreground,FALSE);
         deadline=GetTickCount64()+35000;
         if(!SetTimer(window,1,350,navigate))throw std::runtime_error("Cannot start input fixture");
         auto finish=srf::play_speed_bonus(host,rom,progress,{});

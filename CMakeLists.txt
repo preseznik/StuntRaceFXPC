@@ -11,8 +11,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(srf_core STATIC src/rom.cpp src/random.cpp src/mesh.cpp src/scene.cpp src/championship.cpp
-    src/world.cpp src/streaming.cpp src/vehicle_math.cpp src/vehicle.cpp src/race.cpp src/native_race.cpp
+add_library(srf_core STATIC src/rom.cpp src/random.cpp src/mesh.cpp src/scene.cpp src/custom_content.cpp src/championship.cpp
+    src/world.cpp src/streaming.cpp src/vehicle_math.cpp src/vehicle.cpp src/race.cpp src/course_walls.cpp src/native_race.cpp
     src/body_collision.cpp src/audio.cpp src/music_renderer.cpp src/race_audio.cpp src/presentation.cpp
     src/environment.cpp src/scenery.cpp src/backdrop.cpp src/sunset_rocks.cpp src/night_owl_cones.cpp
     src/water_spray.cpp src/white_land_breakables.cpp src/night_cruise_bonus.cpp src/rain.cpp
@@ -211,7 +211,13 @@ if(SRF_GENERATED_DATA)
                 target_link_options(${target} PRIVATE -municode -static)
             endif()
             add_dependencies(${target} srf_preview)
-            add_test(NAME ${check} COMMAND ${target})
+            if(check STREQUAL "bonus_navigation")
+                target_compile_definitions(${target} PRIVATE SRF_NAVIGATION_TEST)
+                add_dependencies(${target} srf_private_desktop)
+                add_test(NAME ${check} COMMAND srf_private_desktop "$<TARGET_FILE:${target}>")
+            else()
+                add_test(NAME ${check} COMMAND ${target})
+            endif()
             set_tests_properties(${check} PROPERTIES SKIP_RETURN_CODE 77)
         endforeach()
         add_test(NAME night_owl_vr COMMAND srf_sunset_vr_tests --night-owl)

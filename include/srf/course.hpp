@@ -5,7 +5,7 @@
 #include <stdexcept>
 
 namespace srf {
-enum class CourseId : std::uint8_t { easy_ride, aqua_tunnel, sunset_valley, night_owl, kings_forest, sea_breeze, white_land, night_cruise, lake_side, big_ravine, sky_ramp, harbor_city };
+enum class CourseId : std::uint8_t { easy_ride, aqua_tunnel, sunset_valley, night_owl, kings_forest, sea_breeze, white_land, night_cruise, lake_side, big_ravine, sky_ramp, harbor_city, ember_mesa, kasumi_loop };
 struct CourseDefinition {
     CourseId id;
     std::string_view slug, name;
@@ -27,12 +27,22 @@ inline constexpr std::array<CourseDefinition,12> courses{{
     {CourseId::sky_ramp,"sky-ramp","Sky Ramp",0x69b5e,0x6a95b,121},
     {CourseId::harbor_city,"harbor-city","Harbor City",0x6ad25,0x6b9c7,117}
 }};
+inline constexpr CourseDefinition ember_mesa{CourseId::ember_mesa,"ember-mesa","Ember Mesa",0,0,64};
+inline constexpr CourseDefinition kasumi_loop{CourseId::kasumi_loop,"kasumi-loop","Kasumi Inner Loop",0,0,112};
+constexpr bool custom_course(CourseId course) {return course==ember_mesa.id || course==kasumi_loop.id;}
+constexpr CourseId asset_course(CourseId course) {
+    return custom_course(course) ? CourseId::easy_ride : course;
+}
 inline const CourseDefinition& course_definition(CourseId id) {
+    if(id==kasumi_loop.id)return kasumi_loop;
+    if(id==ember_mesa.id)return ember_mesa;
     const auto index=static_cast<unsigned>(id);
     if(index>=courses.size())throw std::invalid_argument("Unsupported original course");
     return courses[index];
 }
 inline CourseId parse_course(std::string_view slug) {
+    if(slug==kasumi_loop.slug)return kasumi_loop.id;
+    if(slug==ember_mesa.slug)return ember_mesa.id;
     for(const auto& course:courses)if(course.slug==slug)return course.id;
     throw std::invalid_argument("Supported courses: easy-ride, aqua-tunnel, sunset-valley, night-owl, kings-forest, sea-breeze, white-land, night-cruise, lake-side, big-ravine, sky-ramp, harbor-city");
 }

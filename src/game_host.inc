@@ -135,18 +135,18 @@ bool game_result(GameHost& host,srf::GameResultPage page,
     SetWindowTextW(host.window,previous);
     return accept && !game_closing;
 }
-bool quick_board(GameHost& host,srf::CourseId& course,srf::PlayerCar& car){
-    constexpr unsigned count=srf::courses.size();
+bool quick_board(GameHost& host,srf::CourseId& course,srf::PlayerCar& car,bool custom){
+    const unsigned count=unsigned(srf::courses.size())+(custom?2u:0u),car_count=custom?5:3;
     unsigned index=0,vehicle=unsigned(car);
-    const auto selected=[&]{return srf::courses[index].id;};
+    const auto selected=[&]{return static_cast<srf::CourseId>(index);};
     while(index+1<count && selected()!=course)++index;
     if(selected()!=course)index=0;
-    constexpr std::array names{L"Coupe",L"4WD",L"F-Type"};
+    constexpr std::array names{L"Coupe",L"4WD",L"F-Type",L"HILLY",L"CARGO"};
     const auto select=[&](unsigned edge,srf::GameResultPage& page){
         if(edge&0x0100)index=(index+1)%count;
         if(edge&0x0200)index=(index+count-1)%count;
-        if(edge&0x0800)vehicle=(vehicle+2)%3;
-        if(edge&0x0400)vehicle=(vehicle+1)%3;
+        if(edge&0x0800)vehicle=(vehicle+car_count-1)%car_count;
+        if(edge&0x0400)vehicle=(vehicle+1)%car_count;
         const auto name=srf::course_definition(selected()).name;
         page.subtitle=std::wstring(name.begin(),name.end())+L"  /  "+names[vehicle];
         page.details=L"Left / Right    Choose course\r\n";

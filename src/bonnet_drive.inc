@@ -4,10 +4,11 @@ namespace {
 void bonnet_camera(const Renderer& renderer,const RenderVehicle& vehicle,float yaw) {
     // The 4WD roof ends at Z=40. Mount the eye over the windscreen, clear
     // of the roof, looking along the bonnet towards the nose at Z=160.
-    const bool coupe=vehicle.descriptor==n64::coupe_player_shell;
+    const bool coupe=vehicle.descriptor==n64::coupe_player_shell || vehicle.descriptor==srf::kestrel_shell;
     const bool f_type=vehicle.descriptor==n64::f_type_player_shell;
-    const float eye_height=coupe?78.f:f_type?66.f:114.f;
-    const float forward=coupe?41.f:f_type?65.f:51.f;
+    const bool van=vehicle.descriptor==srf::cargo_shell;
+    const float eye_height=van?142.f:coupe?78.f:f_type?66.f:114.f;
+    const float forward=van?88.f:coupe?41.f:f_type?65.f:51.f;
     auto mount=vehicle.position;
     for(unsigned axis=0;axis<3;++axis)
         mount[axis]+=-eye_height*vehicle.orientation[3+axis]+forward*vehicle.orientation[6+axis];
@@ -34,7 +35,7 @@ void load_bonnet_pose(Renderer& renderer,const srf::World& world,const srf::Rom&
 void run_bonnet_drive(HWND window,srf::vr::Drive& drive,Renderer& renderer,const srf::Rom& rom,
                       srf::NativeRace& race,srf::CourseScenery& scenery,srf::CourseEnvironment& environment,
                       const srf::World& world,const std::array<srf::Vehicle,4>& previous,PresentationRoad& road,
-                      const RivalWheelTravel& travel,RaceLook look,bool native_motion,const WetTireSpray* spray,const std::filesystem::path& profile,srf::GridCountdownArt& hud_art,std::span<std::uint32_t> hud_pixels,std::unique_ptr<srf::AudioDevice>& audio,
+                      const RivalWheelTravel& travel,RaceLook look,bool native_motion,const WetTireSpray* spray,const DriftTrails* drift_trails,const std::filesystem::path& profile,srf::GridCountdownArt& hud_art,std::span<std::uint32_t> hud_pixels,std::unique_ptr<srf::AudioDevice>& audio,
                       const auto& step,const auto& reset,std::ostream& log) {
     std::unique_ptr<srf::Gamepad> gamepad;
     try{gamepad=std::make_unique<srf::Gamepad>(profile);}catch(const std::exception& e){log<<"Controller: "<<e.what()<<std::endl;}
@@ -47,6 +48,7 @@ void run_bonnet_drive(HWND window,srf::vr::Drive& drive,Renderer& renderer,const
     uint64_t scene_updates=0;
     std::string_view last_backdrop;
     bool muted=false,finished=false;
+    srf::DriftInput drift;
     std::optional<std::tuple<uint64_t,bool,bool>> displayed;
     drive.run([&]{
         MSG msg{};
@@ -68,8 +70,9 @@ void run_bonnet_drive(HWND window,srf::vr::Drive& drive,Renderer& renderer,const
         const bool driving=focused && !controls.paused;
         if(audio && muted==driving){muted=!driving;audio->pause(muted);}
         const auto input=srf::combine_player_input(focused?keyboard_control(window):0,pad);
+        drift.sample(input.requested,driving && !race.countdown_active());
         show_midpoint=clock.advance(predicted,driving,[&]{
-            step(input.requested,input.steering_q15,std::nullopt,&midpoint);
+            step(drift.consume(input.requested),input.steering_q15,std::nullopt,&midpoint);
         }) && !race.ended();
         if(driving)blend=race.ended()?1.f:(float(!show_midpoint)+(native_motion?1.f:clock.blend()))*.5f;
         if(!finished && race.completion().finished){
@@ -102,10 +105,10 @@ void run_bonnet_drive(HWND window,srf::vr::Drive& drive,Renderer& renderer,const
             const auto surface=road.sample(race.bridge_poses());
             auto poses=vehicle_poses(rom,previous,cars,race.player_index(),blend,false,
                 look==RaceLook::remastered?&travel:nullptr,surface,look==RaceLook::n64,std::nullopt,&midpoint,native_motion);
-            if(look==RaceLook::remastered)seat_opponents(poses,surface);
+            road.seat_vehicles(poses,surface);
             const auto& player=poses[race.player_index()];
             bonnet_camera(renderer,player,player.heading);
-            renderer.load_race_world(world,poses,rom,race,scenery,blend-1.f,spray);
+            renderer.load_race_world(world,poses,rom,race,scenery,blend-1.f,spray,drift_trails);
             uploaded=pose_id;++scene_updates;
         }
         auto [it,inserted]=targets.try_emplace(texture);

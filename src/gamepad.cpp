@@ -15,9 +15,10 @@
 namespace srf {
 namespace {
 struct Bindings {
-    std::array<SDL_GamepadButton,8> buttons{SDL_GAMEPAD_BUTTON_DPAD_LEFT,
+    std::array<SDL_GamepadButton,9> buttons{SDL_GAMEPAD_BUTTON_DPAD_LEFT,
         SDL_GAMEPAD_BUTTON_DPAD_RIGHT,SDL_GAMEPAD_BUTTON_SOUTH,SDL_GAMEPAD_BUTTON_EAST,
-        SDL_GAMEPAD_BUTTON_WEST,SDL_GAMEPAD_BUTTON_START,SDL_GAMEPAD_BUTTON_BACK,SDL_GAMEPAD_BUTTON_RIGHT_STICK};
+        SDL_GAMEPAD_BUTTON_WEST,SDL_GAMEPAD_BUTTON_START,SDL_GAMEPAD_BUTTON_BACK,SDL_GAMEPAD_BUTTON_RIGHT_STICK,
+        SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER};
     std::array<SDL_GamepadAxis,3> axes{SDL_GAMEPAD_AXIS_LEFTX,
         SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,SDL_GAMEPAD_AXIS_LEFT_TRIGGER};
     int deadzone=8000,trigger_threshold=4000;
@@ -33,16 +34,18 @@ Bindings read_bindings(const std::filesystem::path& path) {
     if(path.empty() || !std::filesystem::exists(path))return result;
     std::ifstream input(path);
     if(!input)throw std::runtime_error("Cannot read controller settings");
-    const std::array<std::string,8> names{"steer_left","steer_right","accelerate","brake","boost","pause","restart","recenter"};
+    const std::array<std::string,9> names{"steer_left","steer_right","accelerate","brake","boost","pause","restart","recenter","drift"};
     const std::array<std::string,3> axis_names{"steering_axis","accelerate_axis","brake_axis"};
     std::map<std::string,bool> seen;
     std::string line;
     while(std::getline(input,line)) {
         line=trim(line);
+        if(line.starts_with("# drift=") || line.starts_with("# handbrake="))line.erase(0,2);
         if(line.empty() || line[0]=='#' || line[0]==';')continue;
         const auto split=line.find('=');
         if(split==std::string::npos)throw std::runtime_error("Invalid controller settings line");
-        const auto key=trim(line.substr(0,split));auto value=trim(line.substr(split+1));
+        auto key=trim(line.substr(0,split));auto value=trim(line.substr(split+1));
+        if(key=="handbrake")key="drift";
         std::transform(value.begin(),value.end(),value.begin(),[](unsigned char c){return char(std::tolower(c));});
         if(seen[key])throw std::runtime_error("Duplicate controller setting: "+key);
         seen[key]=true;
@@ -139,7 +142,8 @@ struct Gamepad::Impl {
         const bool throttle=button(2) || axis(1)>=bindings.trigger_threshold;
         const bool brake=button(3) || axis(2)>=bindings.trigger_threshold;
         const bool boost=button(4),pause=button(5),restart=button(6),recenter=button(7);
-        const bool neutral=!(left || right || throttle || brake || boost || pause || restart || recenter);
+        const bool drift=button(8);
+        const bool neutral=!(left || right || throttle || brake || boost || pause || restart || recenter || drift);
         if(!focused) {armed=false;previous_pause=previous_restart=previous_recenter=false;return result;}
         // Attach/focus changes must not turn held Start/Back into actions or
         // resume with a stale throttle. Require one neutral observation first.
@@ -160,6 +164,7 @@ struct Gamepad::Impl {
         if(throttle)result.requested|=0x10;
         if(brake)result.requested|=0x40;
         if(boost)result.requested|=0x400;
+        if(drift)result.requested|=drift_button;
         result.pause=pause && !previous_pause;result.restart=restart && !previous_restart;
         result.recenter=recenter && !previous_recenter;
         previous_pause=pause;previous_restart=restart;previous_recenter=recenter;

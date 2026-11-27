@@ -12,7 +12,9 @@
 
 namespace srf {
 // Original player selection order, CPU03:B6F1. Keep 4WD as the default.
-enum class PlayerCar : std::uint8_t { coupe, four_wd, f_type };
+enum class PlayerCar : std::uint8_t { coupe, four_wd, f_type, kestrel, cargo };
+constexpr bool custom_car(PlayerCar car) {return car==PlayerCar::kestrel || car==PlayerCar::cargo;}
+constexpr PlayerCar chassis(PlayerCar car) { return custom_car(car) ? PlayerCar::coupe : car; }
 // One-based course grid slots, indexed by the stable actor order in racers().
 using GridOrder=std::array<std::uint16_t,4>;
 // One animation clock per physical deck. Rendering and wheel contacts use the same frame.
@@ -39,7 +41,8 @@ class NativeRace {
 public:
     explicit NativeRace(const Rom& rom, PlayerCar car = PlayerCar::four_wd, CourseId course = CourseId::easy_ride,
                         std::optional<std::uint16_t> championship_carry = std::nullopt,
-                        std::optional<GridOrder> championship_grid = std::nullopt);
+                        std::optional<GridOrder> championship_grid = std::nullopt,
+                        DrivingPhysics physics = DrivingPhysics::original);
     CourseId course_id() const { return course_; }
     void reset();
     // Clock ticks feed the original countdown. Four is a compatibility default
@@ -48,7 +51,7 @@ public:
     // Digital input and full stick deflection retain the exact legacy path.
     void step(std::uint16_t controls, std::uint8_t elapsed_clock_ticks = 4,
               std::optional<std::int16_t> steering = std::nullopt,
-              std::array<Vehicle,4>* halfway = nullptr);
+              std::array<Vehicle,4>* halfway = nullptr,bool drift_held=false);
     const std::array<Vehicle,4>& racers() const { return racers_; }
     static constexpr std::size_t player_index() { return 3; }
     std::uint64_t phase() const { return phase_; }
@@ -99,8 +102,9 @@ public:
 
 private:
     NativeRace(const Rom& rom, PlayerCar car, CourseId course, const Scene& scene,
-               std::optional<std::uint16_t> championship_carry,std::optional<GridOrder> championship_grid);
+               std::optional<std::uint16_t> championship_carry,std::optional<GridOrder> championship_grid,DrivingPhysics physics);
     CourseId course_;
+    DrivingPhysics physics_;
     std::optional<GridOrder> championship_grid_;
     void update_streaming();
     void refresh_candidates();
@@ -112,6 +116,7 @@ private:
     std::array<WheelContactTuning,4> wheel_tuning_{};
     OpponentTuning opponents_{};
     std::vector<RoutePoint> route_;
+    std::vector<CourseWall> walls_;
     std::vector<CollisionShape> shapes_;
     CourseBridges bridges_;
     std::vector<NativeProp> initial_props_, props_;

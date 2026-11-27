@@ -51,6 +51,13 @@ void CollisionAnimation::advance() {
 StreamingCourse extract_streaming(const Rom& rom, const Scene& scene) {
     const auto& data = rom.bytes();
     StreamingCourse course{read_mask(data, 0x123bd), read_mask(data, 0x12388), {}};
+    if(scene.authored) {
+        for(unsigned i=0;i<scene.points.size();++i) {
+            const auto a=scene.points[i].position,b=scene.points[(i+1)%scene.points.size()].position;
+            course.objects.push_back({i+1,original_spatial_cell((a.x+b.x)/2,(a.z+b.z)/2),0});
+        }
+        return course;
+    }
     for (const auto& object : scene.objects) {
         if (!object.descriptor_address) continue;
         const bool static_shape=object.callback_address==0x08cd2d && object.opcode==2;

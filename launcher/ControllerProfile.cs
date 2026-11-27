@@ -13,6 +13,7 @@ internal sealed class ControllerProfile
         new("accelerate", "Accelerate", "south"),
         new("brake", "Brake / reverse", "east"),
         new("boost", "Boost", "west"),
+        new("drift", "Drift (Enhanced)", "rightshoulder"),
         new("pause", "Pause / resume", "start"),
         new("restart", "Restart race", "back"),
         new("recenter", "Recenter VR seat", "rightstick"),
@@ -63,10 +64,12 @@ internal sealed class ControllerProfile
         foreach (var source in content.Split('\n'))
         {
             var line = source.Trim();
+            if (line.StartsWith("# drift=", StringComparison.Ordinal) || line.StartsWith("# handbrake=", StringComparison.Ordinal)) line = line[2..];
             if (line.Length == 0 || line.StartsWith('#') || line.StartsWith(';')) continue;
             var separator = line.IndexOf('=');
             if (separator <= 0) throw new InvalidDataException("Controller settings require key=value lines.");
             var key = line[..separator].Trim();
+            if (key == "handbrake") key = "drift";
             if (!seen.Add(key)) throw new InvalidDataException($"Duplicate controller setting: {key}");
             profile.Set(key, line[(separator + 1)..]);
         }
@@ -75,11 +78,29 @@ internal sealed class ControllerProfile
 
     internal string Serialize() => "# Stunt Race FX native controller profile\n" +
         string.Join('\n', Bindings.Select(binding => binding.Key).Concat(["steering_mode", "deadzone", "trigger_threshold"])
-            .Select(key => key + "=" + values[key])) + "\n";
+            // Version 127 reads this spelling. Earlier builds ignore the comment.
+            .Select(key => (key == "drift" ? "# handbrake" : key) + "=" + values[key])) + "\n";
 
     internal void Save(string path)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         BuildPipeline.AtomicWrite(path, Serialize());
     }
+
+    internal static string LabelFor(string value) => value switch
+    {
+        "none" => "Unassigned",
+        "south" => "South face button — Xbox A / PlayStation Cross",
+        "east" => "East face button — Xbox B / PlayStation Circle",
+        "west" => "West face button — Xbox X / PlayStation Square",
+        "north" => "North face button — Xbox Y / PlayStation Triangle",
+        "back" => "Back / Select / View", "start" => "Start / Menu", "guide" => "Guide / Home",
+        "leftstick" => "Left stick click", "rightstick" => "Right stick click",
+        "leftshoulder" => "Left shoulder / LB / L1", "rightshoulder" => "Right shoulder / RB / R1",
+        "dpleft" => "D-pad left", "dpright" => "D-pad right", "dpup" => "D-pad up", "dpdown" => "D-pad down",
+        "leftx" => "Left stick horizontal", "lefty" => "Left stick vertical",
+        "rightx" => "Right stick horizontal", "righty" => "Right stick vertical",
+        "lefttrigger" => "Left trigger / LT / L2", "righttrigger" => "Right trigger / RT / R2",
+        _ => value,
+    };
 }

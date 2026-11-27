@@ -9,9 +9,22 @@ internal sealed record GameCourse(string Id, string Name, int ReplayPhases, int 
 
 internal static class GameContent
 {
+    internal const int CustomContentVersion = 120;
+    internal const string CustomCar = "kestrel"; // Stable save and network ID.
+    internal const string CustomCarName = "HILLY";
+    internal const string CargoCar = "cargo";
+    internal static string DisplayCar(string id) => id == CustomCar ? CustomCarName : id == CargoCar ? "CARGO" : id;
+    internal static readonly GameCourse CustomCourse = new("ember-mesa", "Ember Mesa", 1655, CustomContentVersion, CustomContentVersion);
+    internal static readonly GameCourse CityCourse = new("kasumi-loop", "Kasumi Inner Loop", 2243, 123, 123);
+    internal static readonly GameCourse[] CustomCourses = [CustomCourse, CityCourse];
+    internal static readonly string[] CustomCars = [CustomCar, CargoCar];
+    internal static bool IsCustomCourse(string id) => CustomCourses.Any(c => c.Id == id);
+    internal static bool IsCustom(string course, string car) => IsCustomCourse(course) || CustomCars.Contains(car);
+    internal static int RequiredCustomVersion(string course, string car) => course == CityCourse.Id ? CityCourse.MinimumContentVersion : car == CargoCar ? 121 : CustomContentVersion;
+    internal static bool AllowsCourse(string id, bool custom) => Courses.Any(c => c.Id == id) || custom && IsCustomCourse(id);
     internal const string DefaultCourse = "easy-ride";
-    internal static bool SupportsEnhancedStyles(string course, string car) => (car is "4wd" or "coupe" or "f-type") && Courses.Any(entry => entry.Id == course);
-    internal static int StyleVersion(string course, string car, RaceStyle style) => car == "f-type" ? FTypeStyleVersion
+    internal static bool SupportsEnhancedStyles(string course, string car) => (car is "4wd" or "coupe" or "f-type" or CustomCar or CargoCar) && AllowsCourse(course, true);
+    internal static int StyleVersion(string course, string car, RaceStyle style) => IsCustom(course, car) ? RequiredCustomVersion(course, car) : car == "f-type" ? FTypeStyleVersion
         : car == "coupe" ? CoupeStyleVersion
         : course == "harbor-city" ? HarborCityStyleVersion
         : course == "sky-ramp" ? SkyRampStyleVersion
@@ -107,7 +120,13 @@ internal static class GameContent
     internal const int BigRavineLanVersion = 116;
     internal const int AllSpeedTraxLanVersion = 117;
     internal const int FourDriverLanVersion = 119;
-    internal const int CurrentVersion = FourDriverLanVersion;
+    internal const int EnhancedPhysicsVersion = 124;
+    internal const int RacerPhysicsVersion = 129;
+    internal const int CurrentVersion = 130;
+    internal static string DrivingPhysicsHelp =>
+        "Applies to practice, Quick Race and LAN races you host. Hold Shift or the right bumper and steer at speed. " +
+        "Blue sparks mean you can release for a boost (0.7 seconds). Gold sparks mean full boost (2 seconds). " +
+        $"Enhanced LAN races require game content {RacerPhysicsVersion} or later on every PC.";
     internal static readonly IReadOnlyDictionary<string, int> LanCourseVersions = new Dictionary<string, int>
     {
         [DefaultCourse] = LanVersion,
@@ -121,11 +140,13 @@ internal static class GameContent
         ["lake-side"] = LakeSideLanVersion,
         ["big-ravine"] = BigRavineLanVersion,
         ["sky-ramp"] = AllSpeedTraxLanVersion,
+        [CustomCourse.Id] = CustomContentVersion,
+        [CityCourse.Id] = CityCourse.MinimumContentVersion,
         ["harbor-city"] = AllSpeedTraxLanVersion
     };
     internal static bool SupportsVr(GameCourse course, string car, int version) =>
         version >= course.VrVersion &&
-        (car == "4wd" || (car is "coupe" or "f-type") && version >= AllCarsVrVersion);
+        (CustomCars.Contains(car) && version >= RequiredCustomVersion(course.Id, car) || car == "4wd" || (car is "coupe" or "f-type") && version >= AllCarsVrVersion);
     internal const int DefaultCameraDistance = 80, MinCameraDistance = 40, MaxCameraDistance = 160;
     internal static readonly string[] CameraIds = ["chase", "far-chase", "cockpit", "bonnet", "isometric"];
     internal static readonly string[] WeatherIds = ["clear", "partly-cloudy", "overcast", "fog", "rain"];
@@ -144,12 +165,17 @@ internal static class GameContent
         new("harbor-city", "Harbor City", 2613, 12)
     ];
 
-    internal static GameCourse Course(string id) => Courses.FirstOrDefault(course => course.Id == id)
+    internal static GameCourse Course(string id) => CustomCourses.Concat(Courses).FirstOrDefault(course => course.Id == id)
         ?? throw new ArgumentException("Unsupported course.");
 
     internal static string AssetDirectory(string stage, string course)
     {
         Course(course);
-        return course == DefaultCourse ? Path.Combine(stage, "generated") : Path.Combine(stage, "generated", course);
+        return course == DefaultCourse || IsCustomCourse(course) ? Path.Combine(stage, "generated") : Path.Combine(stage, "generated", course);
     }
+
+    internal static string CaptureName(string course, string car, RaceStyle style, int version) =>
+        style == RaceStyle.Original ? version >= 2 ? $"preview-{course}-{car}.png" : $"preview-{car}.png"
+        : GameContent.StylePreview(course, car, style, version);
+
 }

@@ -47,7 +47,7 @@
             scatter_width=w;scatter_height=h;
         }
         const float params[]={viewport.TopLeftX,viewport.TopLeftY,viewport.Width,viewport.Height,
-                              float(w),float(h),density,forest_style?1.f:0.f};
+                              float(w),float(h),density,(forest_style || mesa_style)?1.f:0.f};
         context->UpdateSubresource(volume_constants.Get(),0,nullptr,params,0,0);
         context->VSSetConstantBuffers(3,1,volume_constants.GetAddressOf());
         context->PSSetConstantBuffers(3,1,volume_constants.GetAddressOf());
@@ -61,7 +61,7 @@
         const UINT stride=sizeof(GpuVertex),offset=0;
         context->IASetVertexBuffers(0,1,vertices.GetAddressOf(),&stride,&offset);
         context->VSSetShader(volume_caster.Get(),nullptr,0);context->PSSetShader(volume_mask.Get(),nullptr,0);
-        const UINT instances=forest_style?1:2;
+        const UINT instances=(forest_style || mesa_style)?1:2;
         // Include the foliage cutouts up to the start of the rival geometry.
         context->DrawInstanced(rival_start-cloud_vertices,instances,cloud_vertices,0);
         if(landscape_buffer) {

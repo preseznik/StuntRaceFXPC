@@ -1,0 +1,13 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <SolidColorBrush x:Key="NavSelectedInk" Color="#20242A"/>
+  <SolidColorBrush x:Key="NavSelectedFill" Color="#FFC453"/>
+  <SolidColorBrush x:Key="Base" Color="#151D25"/>
+  <SolidColorBrush x:Key="Surface" Color="#222E39"/>
+  <SolidColorBrush x:Key="Field" Color="#34424D"/>
+  <SolidColorBrush x:Key="Line" Color="#566775"/>
+  <SolidColorBrush x:Key="Ink" Color="#F3F4EE"/>
+  <SolidColorBrush x:Key="Muted" Color="#BDCBD2"/>
+  <SolidColorBrush x:Key="Orange" Color="#FFC453"/>
+  <SolidColorBrush x:Key="Gold" Color="#FFCA61"/>
+  <SolidColorBrush x:Key="OnAccent" Color="#212328"/>
+</ResourceDictionary>

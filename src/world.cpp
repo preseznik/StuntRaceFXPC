@@ -384,7 +384,7 @@ static WorldPalette indexed_world_palette(const Rom& rom,unsigned index,bool dus
 }
 
 WorldPalette extract_world_palette(const Rom& rom,CourseId course,bool dusk) {
-    return indexed_world_palette(rom,static_cast<unsigned>(course_definition(course).id),dusk);
+    return indexed_world_palette(rom,static_cast<unsigned>(course_definition(asset_course(course)).id),dusk);
 }
 
 WorldPalette extract_local_palette(const Rom& rom,unsigned index) {

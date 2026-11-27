@@ -14,7 +14,7 @@ internal sealed record DiscoveredLobby(IPAddress Address, string Host, string Co
 
 internal static class LanDiscovery
 {
-    private static readonly byte[] Query = Encoding.ASCII.GetBytes($"{LanLobby.Protocol} DISCOVER");
+    private static byte[] Query(string protocol) => Encoding.ASCII.GetBytes($"{protocol} DISCOVER");
     private sealed record Reply(string Protocol, Guid Id, string Host, string Course, bool Full, bool Racing, int Players, int Capacity);
 
     internal static async Task Advertise(LanLobby lobby, UdpClient udp, CancellationToken token, Action<string> warn)
@@ -22,13 +22,14 @@ internal static class LanDiscovery
         try
         {
             var id = Guid.NewGuid();
+            var query = Query(lobby.SessionProtocol);
             while (!token.IsCancellationRequested)
             {
                 try
                 {
                     var request = await udp.ReceiveAsync(token);
-                    if (!request.Buffer.AsSpan().SequenceEqual(Query)) continue;
-                    var reply = new Reply(LanLobby.Protocol, id, lobby.Local.Name, lobby.Course, !lobby.CanAcceptGuest, lobby.Racing, lobby.Drivers.Count(d => d != null), lobby.Drivers.Length);
+                    if (!request.Buffer.AsSpan().SequenceEqual(query)) continue;
+                    var reply = new Reply(lobby.SessionProtocol, id, lobby.Local.Name, lobby.Course, !lobby.CanAcceptGuest, lobby.Racing, lobby.Drivers.Count(d => d != null), lobby.Drivers.Length);
                     await udp.SendAsync(JsonSerializer.SerializeToUtf8Bytes(reply), request.RemoteEndPoint, token);
                 }
                 catch (SocketException e) when (e.SocketErrorCode == SocketError.ConnectionReset) { }
@@ -59,8 +60,10 @@ internal static class LanDiscovery
         }
     }
 
-    internal static async Task<DiscoveredLobby[]> Scan(CancellationToken token)
+    internal static async Task<DiscoveredLobby[]> Scan(CancellationToken token, bool customContent = false)
     {
+        var protocol = LanLobby.LobbyProtocol(customContent);
+        var query = Query(protocol);
         using var udp = new UdpClient(0) { EnableBroadcast = true };
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromMilliseconds(1500));
@@ -69,7 +72,11 @@ internal static class LanDiscovery
         {
             foreach (var address in Broadcasts().Append(IPAddress.Broadcast).Append(IPAddress.Loopback).Distinct())
             {
-                try { await udp.SendAsync(Query, new IPEndPoint(address, LanLobby.Port), deadline.Token); }
+                try {
+                    var endpoint = new IPEndPoint(address, LanLobby.Port);
+                    await udp.SendAsync(query, endpoint, deadline.Token);
+                    if (customContent) await udp.SendAsync(Query(LanLobby.Protocol), endpoint, deadline.Token);
+                }
                 catch (SocketException) when (!IPAddress.IsLoopback(address)) { } // Another adapter may still be reachable.
             }
             while (true)
@@ -82,10 +89,10 @@ internal static class LanDiscovery
                 Reply? reply;
                 try { reply = JsonSerializer.Deserialize<Reply>(packet.Buffer); }
                 catch (JsonException) { continue; }
-                if (reply?.Protocol != LanLobby.Protocol || reply.Id == Guid.Empty || string.IsNullOrWhiteSpace(reply.Host)
+                if (reply == null || (reply.Protocol != protocol && reply.Protocol != LanLobby.Protocol) || reply.Id == Guid.Empty || string.IsNullOrWhiteSpace(reply.Host)
                     || reply.Host.Length > 32 || reply.Host.Any(char.IsControl) || reply.Course == null
                     || reply.Capacity is < 2 or > LanLobby.MaxDrivers || reply.Players < 1 || reply.Players > reply.Capacity
-                    || !GameContent.LanCourseVersions.ContainsKey(reply.Course)) continue;
+                    || !GameContent.AllowsCourse(reply.Course, reply.Protocol == LanLobby.LobbyProtocol(true)) || !GameContent.LanCourseVersions.ContainsKey(reply.Course)) continue;
                 var ip = packet.RemoteEndPoint.Address;
                 if (!found.TryGetValue(reply.Id, out var existing) || IPAddress.IsLoopback(existing.Address))
                     found[reply.Id] = new(ip, reply.Host, reply.Course, reply.Full, reply.Racing, reply.Players, reply.Capacity);

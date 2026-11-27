@@ -3,12 +3,12 @@ namespace {
 // Numbering includes the grid countdown. There is at most one outstanding local input.
 int play_lan_race(GameHost* host,Renderer& renderer,const srf::Rom& rom,const srf::World& world,
                   srf::CourseId course,unsigned slot,std::span<const srf::PlayerCar> grid,const std::filesystem::path& controller,
-                  const std::filesystem::path& capture,bool drop_in,bool capture_handoff) {
+                  const std::filesystem::path& capture,bool drop_in,bool capture_handoff,srf::DrivingPhysics physics) {
     using namespace srf;
     using Clock=std::chrono::steady_clock;
     const auto& local_course=lan_courses.at(static_cast<unsigned>(course));
     const auto own=grid[slot];
-    LocalRace race(rom,local_course,grid[0],grid[1],false,grid.subspan(2));
+    LocalRace race(rom,local_course,grid[0],grid[1],false,grid.subspan(2),physics);
     const bool cruise_test=!host && capture_handoff && course==CourseId::night_cruise;
     const bool lake_test=!host && capture_handoff && course==CourseId::lake_side;
     const bool ravine_test=!host && course==CourseId::big_ravine;
@@ -19,6 +19,8 @@ int play_lan_race(GameHost* host,Renderer& renderer,const srf::Rom& rom,const sr
     CourseEnvironment environment(rom,course);
     renderer.load_world(world,0);
     CourseScenery scenery(rom,course);
+    std::optional<DriftTrails> drift_trails;
+    if(physics==DrivingPhysics::enhanced)drift_trails.emplace(world,course);
     WetTireSpray spray;
     const bool wet=renderer.rain_spray_enabled();
     auto road=presentation_surfaces(world,course,race_camera.enabled);
@@ -37,7 +39,7 @@ int play_lan_race(GameHost* host,Renderer& renderer,const srf::Rom& rom,const sr
     }
     BonusDashboard dashboard(rom,own);
     BonusHudBoost boost(rom,0);
-    CourseHudMap map(rom,local_course.index);
+    CourseHudMap map(rom,course);
     RaceHudText notices(rom);
     const auto tiles=extract_bonus_hud_tiles(rom), signal=extract_start_light_tiles(rom);
     const auto palette=bonus_hud_palette(rom,0xf8960);
@@ -47,6 +49,8 @@ int play_lan_race(GameHost* host,Renderer& renderer,const srf::Rom& rom,const sr
     snapshot();
     constexpr unsigned countdown=42;
     unsigned tick=0;
+    DriftInput drift;
+    std::optional<unsigned> test_drift_start;
     const auto draw_course=[&](float fraction,std::span<const SceneryPose> actors,const EnvironmentPresentation& sky,std::span<const SceneryPose> decks,
                                std::span<const SceneryPose> props,std::span<const ScenerySprite> particles,std::span<const SceneryPose> rocks={},std::span<const SceneryPose> bonus={}){
         std::vector<RenderVehicle> poses(grid.size());
@@ -57,13 +61,14 @@ int play_lan_race(GameHost* host,Renderer& renderer,const srf::Rom& rom,const sr
         }
         const auto& b=race.car(slot).body;
         const auto surface=road.sample(race.bridge_poses());
-        if(race_camera.enabled)seat_opponents(poses,surface);
+        road.seat_vehicles(poses,surface);
         chase_camera(renderer,poses[slot],lerp_angle(previous[slot].body.word(0x24),b.word(0x24),fraction),surface,course);
         const float phase=float(race.phase())+fraction;
         renderer.set_environment(sky);
         renderer.set_race_phase(phase);
         renderer.load_world(world,0,poses,&rom,actors,rocks,props,decks,scenery.sprites(),nullptr,{},particles,bonus);
         if(wet)renderer.load_spray(spray,phase);
+        if(drift_trails)renderer.load_drift(*drift_trails,phase-1);
         if(race_hud_visible || tick<countdown){
             std::fill(overlay.begin(),overlay.end(),0);
             std::span<const std::uint32_t> panel;
@@ -112,6 +117,10 @@ int play_lan_race(GameHost* host,Renderer& renderer,const srf::Rom& rom,const sr
             environment.step(local,local.word(0x7a),(phase+1)*100/14);
             const bool gate_open=cruise_test && std::ranges::any_of(race.bonus_poses(),[](const auto& p){return p.command_offset && p.pitch;});
             race.step(frame.buttons,frame.steering);
+            if(drift_trails) {
+                drift_trails->begin_phase(race.phase(),race.bridge_poses());
+                for(unsigned i=0;i<grid.size();++i)drift_trails->emit(race.phase(),i,previous[i],race.car(i));
+            }
             if(sky_test)for(auto sound:race.bonus_effects()){
                 if(sound!=0x0e && sound!=0x59)continue;
                 const auto& p=race.bonus_poses().front().position;
@@ -265,21 +274,36 @@ int play_lan_race(GameHost* host,Renderer& renderer,const srf::Rom& rom,const sr
         // Give the hidden launcher's real discovery scan time to finish during lap one.
         const bool pace_discovery=cruise_test && slot==0 && !captured && tick>=countdown && tick<280;
         const bool sky_scan=sky_test && !slot && !captured && race.car(0).body.word(0x7a)==1;
+        const bool focused=host && game_focused(host->window);
+        GamepadInput input{};
+        if(host) {
+            input=combine_player_input(focused?local_keyboard(keys,false):0,pad?pad->poll(focused,race_camera.look):GamepadInput{});
+            drift.sample(input.requested,focused && tick>=countdown && physics==DrivingPhysics::enhanced);
+        }
         if(!sent && (!host || now>=next) && (!pace_discovery || now-last_step>=std::chrono::milliseconds(32)) &&
            (!sky_scan || now-last_step>=std::chrono::milliseconds(71))){
-            GamepadInput input{};
-            if(host && game_focused(host->window)){
-                input=combine_player_input(local_keyboard(keys,false),pad?pad->poll(true,race_camera.look):GamepadInput{});
-            }else if(!host){
+            if(host){
+                input.requested=drift.consume(input.requested);
+            }else{
                 // Offscreen regression driver uses the same controls and route as a human car.
                 const bool snow_test=capture_handoff && course==CourseId::white_land;
                 const int pace=snow_test ? (!slot && race.car(0).body.word(0x7a)>0 ? 65 : 0) : int(slot)*20;
                 input.requested=route_input(slot,pace,snow_test && !slot);
+                if(physics==DrivingPhysics::enhanced && !test_drift_start && (input.requested&3) &&
+                   std::int16_t(race.car(slot).body.word(0x4a))>=100 && race.car(slot).body.word(0x44)<3)
+                    test_drift_start=tick;
+                if(test_drift_start && tick-*test_drift_start<16)
+                    input.requested|=drift_button;
             }
             // Vehicle records include the selected ROM model, pose, wheels and route progress.
             std::uint32_t digest=2166136261u;
             const auto hash=[&](const VehicleState& state){for(auto word:state.words)digest=(digest^word)*16777619u;};
             for(unsigned i=0;i<grid.size();++i){hash(race.car(i).body);for(const auto& w:race.car(i).wheels)hash(w);}
+            if(physics==DrivingPhysics::enhanced)for(unsigned i=0;i<grid.size();++i) {
+                digest=(digest^race.car(i).drift_ticks)*16777619u;
+                digest=(digest^race.car(i).drift_charge_ticks)*16777619u;
+                digest=(digest^std::uint8_t(race.car(i).drift_direction))*16777619u;
+            }
             for(const auto& pose:race.prop_poses()){
                 for(auto value:{pose.position.x,pose.position.y,pose.position.z,int(pose.yaw)})
                     digest=(digest^std::uint32_t(value))*16777619u;

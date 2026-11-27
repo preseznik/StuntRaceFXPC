@@ -65,6 +65,7 @@ internal static class CommandLine
 
     private static async Task<int> TestChildAsync(string[] args)
     {
+        if (args[0] == "custom-content") { CustomContentChecks(args[1]); return 0; }
         if (args[0] == "echo") { Console.WriteLine(JsonSerializer.Serialize(args[1..])); return 0; }
         if (args[0] == "fail") return 7;
         if (args[0] == "wait") { await Task.Delay(TimeSpan.FromMinutes(2)); return 0; }
@@ -87,6 +88,7 @@ internal static class CommandLine
         Directory.CreateDirectory(directory);
         var checks = new List<string>();
         void Check(bool value, string label) { if (!value) throw new InvalidOperationException("FAIL: " + label); checks.Add(label); Console.WriteLine("PASS: " + label); }
+        PortableRomPathChecks(directory, Check);
         LauncherChecks(directory, Check);
         ReplayValidationChecks(Check);
         ControllerChecks(directory, Check);
@@ -135,6 +137,28 @@ internal static class CommandLine
         File.WriteAllText(Path.Combine(directory, "results.json"), JsonSerializer.Serialize(new { passed = checks.Count, checks }, BuildPipeline.JsonOptions));
     }
 
+    private static void PortableRomPathChecks(string directory, Action<bool, string> check)
+    {
+        var package = Path.Combine(directory, "relocated game");
+        var output = Path.Combine(package, "user-builds");
+        var stage = Path.Combine(output, "builds", "test");
+        foreach (var file in new[] { "native/srf_preview.exe", "native/SDL3.dll", "generated/world.srfworld", "generated/sprites.srfsprites" })
+        {
+            var path = Path.Combine(stage, file);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, "");
+        }
+        var record = new BuildRecord("test", "{}", "test", "test", false, DateTimeOffset.UtcNow);
+        string? Load(string rom)
+        {
+            File.WriteAllText(Path.Combine(output, "last-success.json"), JsonSerializer.Serialize(record with { RomPath = rom }));
+            return BuildPipeline.LastSuccess(output)?.RomPath;
+        }
+        check(Load("game.sfc") == Path.Combine(package, "game.sfc"), "Portable races resolve the ROM beside user-builds");
+        var external = Path.Combine(directory, "external ROM.sfc");
+        check(Load(external) == external, "Local builds keep their external ROM path");
+    }
+
     private static void ReplayValidationChecks(Action<bool, string> check)
     {
         string RaceResult(GameCourse course) => JsonSerializer.Serialize(new
@@ -168,6 +192,38 @@ internal static class CommandLine
         }
     }
 
+    private static void CustomContentChecks(string directory)
+    {
+        var path = Path.Combine(directory, "custom-settings-" + Guid.NewGuid().ToString("N") + ".json");
+        static T Field<T>(MainForm form, string name) where T : Control => (T)form.Controls.Find(name, true).Single();
+        static void CheckChoices(MainForm form, bool enabled)
+        {
+            foreach (var name in new[] { "Course", "VrCourse", "LanTrack", "PlayerCar", "VrCar", "LanCar" }) {
+                var box = Field<ComboBox>(form, name);
+                var labels = name is "Course" or "VrCourse" or "LanTrack" ? GameContent.CustomCourses.Select(c => c.Name) : GameContent.CustomCars.Select(GameContent.DisplayCar);
+                foreach (var label in labels)
+                if ((box.FindStringExact(label) >= 0) != enabled)
+                    throw new InvalidDataException($"Unexpected {label} availability in {name}.");
+            }
+        }
+        using (var form = new MainForm(path)) {
+            _ = form.Handle;
+            CheckChoices(form, false);
+            Field<CheckBox>(form, "CustomContent").Checked = true;
+            CheckChoices(form, true);
+            var course = Field<ComboBox>(form, "Course"); course.SelectedIndex = course.FindStringExact("Kasumi Inner Loop");
+            var car = Field<ComboBox>(form, "PlayerCar"); car.SelectedIndex = car.FindStringExact("CARGO");
+            form.Close();
+        }
+        using var restored = new MainForm(path);
+        CheckChoices(restored, true);
+        if (Field<ComboBox>(restored, "PlayerCar").Text != "CARGO" || Field<ComboBox>(restored, "Course").Text != "Kasumi Inner Loop")
+            throw new InvalidDataException("Custom Quick Race selections did not persist.");
+        Field<CheckBox>(restored, "CustomContent").Checked = false;
+        CheckChoices(restored, false);
+        if (Field<ComboBox>(restored, "PlayerCar").Text != "4WD" || Field<ComboBox>(restored, "Course").Text != "Easy Ride")
+            throw new InvalidDataException("Disabling custom content left a hidden selection.");
+    }
     private static void LauncherChecks(string directory, Action<bool, string> check)
     {
         var legacy = new BuildRecord("test", "{}", "test", "test", true, DateTimeOffset.UtcNow);
@@ -224,18 +280,19 @@ internal static class CommandLine
         {
             try
             {
+                CustomContentChecks(directory);
                 using (var form = new MainForm(settings) { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-32000, -32000) })
                 {
                     var car = (ComboBox)form.Controls.Find("PlayerCar", true).Single();
                     var course = (ComboBox)form.Controls.Find("Course", true).Single();
                     var resolution = (ComboBox)form.Controls.Find("Resolution", true).Single();
                     var mode = (ComboBox)form.Controls.Find("WindowMode", true).Single();
-                    var launchMode = (ComboBox)form.Controls.Find("LaunchMode", true).Single();
-                    if (launchMode.Text != "Normal" || car.Text != "4WD" || course.Text != "Easy Ride" || resolution.Text != "1920 x 1080" || mode.SelectedIndex != 0)
+                    var launchMode = (LaunchModePicker)form.Controls.Find("LaunchMode", true).Single();
+                    if (launchMode.SelectedMode != "Full game" || car.Text != "4WD" || course.Text != "Easy Ride" || resolution.Text != "1920 x 1080" || mode.SelectedIndex != 0)
                         throw new InvalidOperationException("Legacy settings defaults changed");
                     var launch = (Button)form.Controls.Find("LaunchGame", true).Single();
                     if (launch.Enabled) throw new InvalidOperationException("Normal enabled without a build");
-                    launchMode.SelectedItem = "Quick Race";
+                    launchMode.SelectedMode = "Quick Race";
                     if (launch.Enabled) throw new InvalidOperationException("Quick Race enabled without a build");
                     form.Shown += (_, _) => form.BeginInvoke(() =>
                     {
@@ -281,7 +338,7 @@ internal static class CommandLine
                     ((ComboBox)restored.Controls.Find("VrRefresh", true).Single()).Text != "120 Hz" ||
                     ((ComboBox)restored.Controls.Find("VrScale", true).Single()).Text != "75%")
                     throw new InvalidOperationException("Frame settings did not persist");
-                if (((ComboBox)restored.Controls.Find("LaunchMode", true).Single()).Text != "Quick Race" ||
+                if (((LaunchModePicker)restored.Controls.Find("LaunchMode", true).Single()).SelectedMode != "Quick Race" ||
                     ((ComboBox)restored.Controls.Find("VrCourse", true).Single()).Text != "Aqua Tunnel" ||
                     ((ComboBox)restored.Controls.Find("PlayerCar", true).Single()).Text != "F-TYPE" ||
                     ((ComboBox)restored.Controls.Find("Course", true).Single()).Text != GameContent.Courses[^1].Name ||
@@ -328,11 +385,11 @@ internal static class CommandLine
                 File.WriteAllText(partial, JsonSerializer.Serialize(new LauncherSettings(Car: "coupe", Course: "aqua-tunnel", RemasteredMode: true,
                     GraphicsProfiles: new() { ["Quick Race"] = new("2560 x 1440"), ["N64 mode"] = new("1280 x 720"), ["Remastered"] = new("3840 x 2160") })));
                 using var fresh = new MainForm(partial);
-                var freshMode = (ComboBox)fresh.Controls.Find("LaunchMode", true).Single();
+                var freshMode = (LaunchModePicker)fresh.Controls.Find("LaunchMode", true).Single();
                 var style = (ComboBox)fresh.Controls.Find("VisualStyle", true).Single();
                 var carChoice = (ComboBox)fresh.Controls.Find("PlayerCar", true).Single();
                 var display = (ComboBox)fresh.Controls.Find("Resolution", true).Single();
-                if (freshMode.Text != "Quick Race" || style.Text != "Remastered" || carChoice.Text != "4WD" || display.Text != "3840 x 2160")
+                if (freshMode.SelectedMode != "Quick Race" || style.Text != "Remastered" || carChoice.Text != "4WD" || display.Text != "3840 x 2160")
                     throw new InvalidOperationException("The former Remastered launch did not migrate to its Easy Ride 4WD race");
                 style.SelectedItem = "N64 Mode";
                 if (display.Text != "1280 x 720") throw new InvalidOperationException("The legacy N64 profile did not migrate");
@@ -341,7 +398,7 @@ internal static class CommandLine
                     throw new InvalidOperationException("F-TYPE lost the selected Quick Race profile");
                 carChoice.SelectedIndex = 0;
                 if (style.Text != "N64 Mode") throw new InvalidOperationException("Returning to 4WD lost its visual style");
-                freshMode.SelectedItem = "Normal";
+                freshMode.SelectedMode = "Full game";
                 if (style.Text != "Classic" || display.Text != "1920 x 1080")
                     throw new InvalidOperationException("A new profile inherited another mode's resolution");
                 style.SelectedItem = "Remastered";
@@ -350,17 +407,17 @@ internal static class CommandLine
                 fresh.Shown += (_, _) => fresh.BeginInvoke(fresh.Close);
                 fresh.ShowDialog();
                 using var migrated = new MainForm(partial);
-                var migratedMode = (ComboBox)migrated.Controls.Find("LaunchMode", true).Single();
-                if (migratedMode.Text != "Normal" ||
+                var migratedMode = (LaunchModePicker)migrated.Controls.Find("LaunchMode", true).Single();
+                if (migratedMode.SelectedMode != "Full game" ||
                     ((ComboBox)migrated.Controls.Find("VisualStyle", true).Single()).Text != "Remastered")
                     throw new InvalidOperationException("The preferred Normal style did not survive reopening");
-                migratedMode.SelectedItem = "Quick Race";
+                migratedMode.SelectedMode = "Quick Race";
                 if (((ComboBox)migrated.Controls.Find("VisualStyle", true).Single()).Text != "N64 Mode" ||
                     ((ComboBox)migrated.Controls.Find("Resolution", true).Single()).Text != "1280 x 720")
                     throw new InvalidOperationException("The preferred Quick Race style and profile did not survive reopening");
                 foreach (var (quick, vr, normalVr, expectedMode) in new[] {
-                    (false, false, false, "Normal"), (true, false, false, "Quick Race"),
-                    (false, true, false, "Quick Race"), (false, true, true, "Normal") })
+                    (false, false, false, "Full game"), (true, false, false, "Quick Race"),
+                    (false, true, false, "Quick Race"), (false, true, true, "Full game") })
                 {
                     File.WriteAllText(partial, JsonSerializer.Serialize(new LauncherSettings(
                         QuickRace: quick, EasyRideVr: vr, NormalVr: normalVr, VrCourse: "aqua-tunnel",
@@ -370,10 +427,10 @@ internal static class CommandLine
                     {
                         using var savedForm = new MainForm(partial);
                         ComboBox Box(string name) => (ComboBox)savedForm.Controls.Find(name, true).Single();
-                        var launchMode = Box("LaunchMode");
+                        var launchMode = (LaunchModePicker)savedForm.Controls.Find("LaunchMode", true).Single();
                         var target = Box("DisplayTarget");
-                        if (!launchMode.Items.Cast<string>().SequenceEqual(new[] { "Normal", "Quick Race" }) ||
-                            launchMode.Text != expectedMode || target.Text != (vr ? "VR" : "Desktop") ||
+                        if (!launchMode.Controls.Cast<Control>().Select(c => c.Text).SequenceEqual(new[] { "Full game", "Quick Race" }) ||
+                            launchMode.SelectedMode != expectedMode || target.Text != (vr ? "VR" : "Desktop") ||
                             Box("VrCourse").Text != "Aqua Tunnel" || Box("Course").Text != "Night Owl" ||
                             Box("PlayerCar").Text != "COUPE" || Box("VrCar").Text != (pass == 0 ? "4WD" : "F-TYPE"))
                             throw new InvalidOperationException("Launch mode, display or course changed during migration");
@@ -382,10 +439,10 @@ internal static class CommandLine
                             throw new InvalidOperationException("VR style did not survive reopening");
                         Box("VisualStyle").SelectedItem = "Remastered";
                         Box("VrCar").SelectedIndex = 2;
-                        if (Box("GraphicsProfile").Text != "VR" || Box("Resolution").Text != "1280 x 720")
+                        if ((string?)Box("GraphicsProfile").SelectedItem != "VR" || Box("Resolution").Text != "1280 x 720")
                             throw new InvalidOperationException("VR graphics profile lost during migration");
                         target.SelectedItem = "Desktop";
-                        if (Box("VisualStyle").Text != (expectedMode == "Normal" ? "N64 Mode" : "Remastered"))
+                        if (Box("VisualStyle").Text != (expectedMode == "Full game" ? "N64 Mode" : "Remastered"))
                             throw new InvalidOperationException("Switching displays lost the desktop style");
                         Box("GraphicsProfile").SelectedItem = "Classic";
                         if (Box("Resolution").Text != "3840 x 2160")
@@ -429,25 +486,25 @@ internal static class CommandLine
                         : JsonSerializer.Serialize(new LauncherSettings(OutputPath: output, N64Mode: version >= 32)));
                     using var form = new MainForm(settings);
                     var launch = (Button)form.Controls.Find("LaunchGame", true).Single();
-                    var mode = (ComboBox)form.Controls.Find("LaunchMode", true).Single();
+                    var mode = (LaunchModePicker)form.Controls.Find("LaunchMode", true).Single();
                     var style = (ComboBox)form.Controls.Find("VisualStyle", true).Single();
-                    if (version >= 31 && (mode.Text != "Quick Race" || style.Text != "N64 Mode" || !launch.Enabled))
+                    if (version >= 31 && (mode.SelectedMode != "Quick Race" || style.Text != "N64 Mode" || !launch.Enabled))
                         throw new InvalidOperationException($"N64 mode selection lost for content version {version}");
-                    mode.SelectedItem = "Quick Race";
+                    mode.SelectedMode = "Quick Race";
                     var target = (ComboBox)form.Controls.Find("DisplayTarget", true).Single();
                     target.SelectedItem = "VR";
-                    if (launch.Text != "Launch VR" || launch.Enabled != (version >= 28))
+                    if (launch.Text != "Start race" || launch.Enabled != (version >= 28))
                         throw new InvalidOperationException($"Wrong Easy Ride VR availability for content version {version}");
                     var vrCourses = (ComboBox)form.Controls.Find("VrCourse", true).Single();
                     if (!vrCourses.Items.Cast<GameCourse>().Select(c => c.Id).SequenceEqual(GameContent.Courses.Select(c => c.Id)))
                         throw new InvalidOperationException("Wrong VR Quick Race course list");
                     vrCourses.SelectedIndex = 1;
                     if (launch.Enabled) throw new InvalidOperationException("Aqua Tunnel VR enabled without its world");
-                    mode.SelectedItem = "Normal";
+                    mode.SelectedMode = "Full game";
                     if (launch.Enabled != (version >= GameContent.SeamlessVersion))
                         throw new InvalidOperationException($"Wrong Normal VR availability for version {version}");
                     target.SelectedItem = "Desktop";
-                    if (launch.Text != "Launch Game" || launch.Enabled != (version >= 2))
+                    if (launch.Text != "Start game" || launch.Enabled != (version >= 2))
                         throw new InvalidOperationException($"Wrong Normal availability for content version {version}");
                     foreach (var look in new[] { "N64 Mode", "Remastered" })
                     {
@@ -462,8 +519,8 @@ internal static class CommandLine
                     var hideHud = (CheckBox)form.Controls.Find("HideRaceHud", true).Single();
                     if (hideHud.Checked || hideHud.Enabled != (version >= GameContent.RaceHudVersion))
                         throw new InvalidOperationException($"Wrong race HUD default or availability for version {version}");
-                    mode.SelectedItem = "Quick Race";
-                    if (launch.Text != "Launch Quick Race" || !launch.Enabled)
+                    mode.SelectedMode = "Quick Race";
+                    if (launch.Text != "Start race" || !launch.Enabled)
                         throw new InvalidOperationException($"Wrong Quick Race availability for content version {version}");
                     if (version >= 2)
                     {
@@ -490,9 +547,9 @@ internal static class CommandLine
                         }
                         carChoice.SelectedIndex = 0;
                         var lowRaster = (CheckBox)form.Controls.Find("N64LowRaster", true).Single();
-                        if (lowRaster.Checked || lowRaster.Enabled != (version >= GameContent.N64RasterVersion))
+                        if (!lowRaster.Checked || lowRaster.Enabled != (version >= GameContent.N64RasterVersion))
                             throw new InvalidOperationException($"Wrong N64 raster default or availability for version {version}");
-                        if (launch.Text != "Launch Quick Race" || launch.Enabled != (version >= GameContent.N64ModeVersion))
+                        if (launch.Text != "Start race" || launch.Enabled != (version >= GameContent.N64ModeVersion))
                             throw new InvalidOperationException($"Wrong Easy Ride (N64 mode) availability for content version {version}");
                         var timeOfDay = (ComboBox)form.Controls.Find("TimeOfDay", true).Single();
                         var roughness = (CheckBox)form.Controls.Find("MaterialRoughness", true).Single();
@@ -543,16 +600,16 @@ internal static class CommandLine
                             throw new InvalidOperationException($"Wrong Remastered graphics defaults or availability for version {version}");
                         if (timeOfDay.Text != "12:00" || timeOfDay.Enabled != (version >= GameContent.SunLightingVersion))
                             throw new InvalidOperationException($"Wrong time-of-day default or availability for version {version}");
-                        if (launch.Text != "Launch Quick Race" || launch.Enabled != (version >= GameContent.RemasteredVersion) || lowRaster.Enabled)
+                        if (launch.Text != "Start race" || launch.Enabled != (version >= GameContent.RemasteredVersion) || lowRaster.Enabled)
                             throw new InvalidOperationException($"Wrong Remastered availability or raster settings for version {version}");
                         camera.SelectedItem = "Isometric";
                         if (launch.Enabled != (version >= GameContent.IsometricVersion))
                             throw new InvalidOperationException($"Wrong Isometric launch availability for version {version}");
                         camera.SelectedItem = "Chase";
                         courses.SelectedIndex = 1;
-                        mode.SelectedItem = "Normal";
+                        mode.SelectedMode = "Full game";
                         if (!launch.Enabled) throw new InvalidOperationException("Missing Quick Race course disabled Normal");
-                        mode.SelectedItem = "Quick Race";
+                        mode.SelectedMode = "Quick Race";
                         if (launch.Enabled || courses.SelectedIndex != 1)
                             throw new InvalidOperationException("Switching modes lost the Quick Race selection");
                         var aquaAssets = Directory.CreateDirectory(GameContent.AssetDirectory(stage, "aqua-tunnel"));
@@ -631,12 +688,15 @@ internal static class CommandLine
     {
         var file = ControllerProfile.FilePath(Path.Combine(directory, "controller settings č"));
         var defaults = ControllerProfile.Load(file);
-        check(defaults["accelerate"] == "south" && defaults["deadzone"] == "8000" && defaults["steering_mode"] == "digital" && !File.Exists(file),
+        check(defaults["accelerate"] == "south" && defaults["drift"] == "rightshoulder" && defaults["deadzone"] == "8000" && defaults["steering_mode"] == "digital" && !File.Exists(file),
             "Missing controller profile uses defaults without creating a file");
         var profile = ControllerProfile.Parse("# comment\r\n; comment\r\n accelerate = A \r\nboost=none\nsteering_axis=RIGHTX\ndeadzone=1234\ntrigger_threshold=5678\n");
         check(profile["accelerate"] == "south" && profile["boost"] == "none" && profile["steering_axis"] == "rightx" && profile["brake"] == "east" && profile["steering_mode"] == "digital",
             "Controller aliases, comments, remapping and partial defaults round-trip");
         profile.Set("steering_mode", "ANALOG");
+        profile.Set("drift", "leftshoulder");
+        check(ControllerProfile.Parse("# handbrake=leftshoulder")["drift"] == "leftshoulder" &&
+              ControllerProfile.Parse("# drift=none")["drift"] == "none", "Saved and renamed Drift bindings load");
         profile.Save(file);
         var saved = File.ReadAllBytes(file);
         check(!saved.Take(3).SequenceEqual(new byte[] { 0xef, 0xbb, 0xbf }) && ControllerProfile.Load(file).Serialize() == profile.Serialize(),

@@ -39,7 +39,7 @@ internal sealed class ControllerDialog : Form
             var combo = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList,
                 DisplayMember = nameof(Choice.Label), ValueMember = nameof(Choice.Value), AccessibleName = binding.Label };
             foreach (var value in binding.Axis ? ControllerProfile.Axes : ControllerProfile.Buttons)
-                combo.Items.Add(new Choice(value, LabelFor(value)));
+                combo.Items.Add(new Choice(value, ControllerProfile.LabelFor(value)));
             fields.Add(binding.Key, combo);
             AddRow(binding.Label, combo);
         }
@@ -58,7 +58,7 @@ internal sealed class ControllerDialog : Form
         root.Controls.Add(new Label { Text = "Values: 1–30000. Settings apply on the next game launch.\nSave writes controller.ini in the selected build folder.", AutoSize = true, Margin = new Padding(0, 10, 0, 8) });
         root.Controls.Add(error);
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Margin = new Padding(0, 8, 0, 0) };
-        var save = new Button { Text = "Save", AutoSize = true };
+        var save = new Button { Text = "Save", Tag = SurfaceRole.Primary, AutoSize = true };
         var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
         var defaults = new Button { Text = "Restore defaults", AutoSize = true };
         buttons.Controls.AddRange([save, cancel, defaults]);
@@ -107,20 +107,5 @@ internal sealed class ControllerDialog : Form
         trigger.Value = int.Parse(profile["trigger_threshold"], CultureInfo.InvariantCulture);
     }
 
-    private static string LabelFor(string value) => value switch
-    {
-        "none" => "Unassigned",
-        "south" => "South face button — Xbox A / PlayStation Cross",
-        "east" => "East face button — Xbox B / PlayStation Circle",
-        "west" => "West face button — Xbox X / PlayStation Square",
-        "north" => "North face button — Xbox Y / PlayStation Triangle",
-        "back" => "Back / Select / View", "start" => "Start / Menu", "guide" => "Guide / Home",
-        "leftstick" => "Left stick click", "rightstick" => "Right stick click",
-        "leftshoulder" => "Left shoulder / LB / L1", "rightshoulder" => "Right shoulder / RB / R1",
-        "dpleft" => "D-pad left", "dpright" => "D-pad right", "dpup" => "D-pad up", "dpdown" => "D-pad down",
-        "leftx" => "Left stick horizontal", "lefty" => "Left stick vertical",
-        "rightx" => "Right stick horizontal", "righty" => "Right stick vertical",
-        "lefttrigger" => "Left trigger / LT / L2", "righttrigger" => "Right trigger / RT / R2",
-        _ => value,
-    };
+
 }

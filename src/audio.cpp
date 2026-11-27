@@ -152,7 +152,7 @@ SoundBank extract_easy_ride_audio(const Rom& rom) {
 static SoundBank extract_indexed_audio(const Rom& rom,unsigned index,CourseId course);
 static SoundBank extract_sound_bank(const Rom& rom,std::array<std::uint32_t,6> uploads,unsigned engine_profile,CourseId course);
 SoundBank extract_course_audio(const Rom& rom,CourseId course) {
-    return extract_indexed_audio(rom,static_cast<unsigned>(course_definition(course).id),course);
+    return extract_indexed_audio(rom,static_cast<unsigned>(course_definition(asset_course(course)).id),course);
 }
 SoundBank extract_speed_bonus_audio(const Rom& rom) {
     // All three Bonus Trax entries select the same song, instruments and effects.

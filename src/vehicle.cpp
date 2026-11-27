@@ -1,7 +1,9 @@
+#include "srf/custom_content.hpp"
 #include "srf/vehicle.hpp"
 #include "srf/race.hpp"
 #include "srf/body_collision.hpp"
 #include "srf/vehicle_math.hpp"
+#include "srf/presentation.hpp"
 #include "srf/scene.hpp"
 #include <algorithm>
 #include <cstdlib>
@@ -10,6 +12,7 @@
 namespace srf {
 namespace {
 using Word = std::uint16_t;
+constexpr int max_vehicle_speed=600;
 int signed_word(Word value) { return value >= 0x8000 ? int(value) - 0x10000 : int(value); }
 Word wrap(int value) { return static_cast<Word>(value); }
 Word add(Word a, Word b) { return wrap(int(a) + b); }
@@ -126,6 +129,12 @@ static Vehicle create_chassis(std::span<const std::uint8_t> rom,Word definition,
         }
         wheel.word(0x3c)=negate(wheel.word(0x3c));
         wheel.word(0x12)=field(row);
+        if(i<vehicle.wheels.size()) {
+            const auto data=0x48000+wheel.word(0x12);
+            const auto descriptor=(rom[data]|unsigned(rom[data+1])<<8)&0x7fff;
+            const auto radius=Word(rom[descriptor+16]|unsigned(rom[descriptor+17])<<8);
+            vehicle.tire_diameters[i]=original_sprite_diameter(radius,rom[descriptor+7],rom[data+4]);
+        }
         wheel.word(0x16)=4;
         wheel.word(0x1a)=field(0x26);
         wheel.word(0x1c)=4;
@@ -490,7 +499,7 @@ void integrate_vehicle_velocity(VehicleState& state, VehicleForces& forces,
         if (before>=8192) { state.word(angle)=8192;state.word(angle+0x10)=0; }
         else if (before < -8192) { state.word(angle)=wrap(-8192);state.word(angle+0x10)=0; }
     }
-    if (!negative_difference(absolute(state.word(0x4a)),600)) {
+    if (!negative_difference(absolute(state.word(0x4a)),max_vehicle_speed)) {
         forces.words[0]=forces.words[2]=0;
         // Suppression is physical; the original one-eighth loss is per callback.
         if(advance_motion_rules)for (const unsigned velocity : {0x2eu,0x32u})
@@ -650,6 +659,85 @@ void update_native_prop(NativeProp& prop,std::uint8_t player_lap,
     }
 }
 
+// Fixed-point corrections at the existing wheel solver cadence. Y increases downwards.
+static void enhanced_contact_forces(const VehicleState& body,VehicleStepResult& result,bool was_airborne) {
+    auto& forces=result.forces.words;
+    const int supported=4-int(body.word(0x44));
+    if(!supported) {
+        // A ballistic arc has constant gravity regardless of road speed.
+        const Word gravity=(body.word(0x1c)&8)?120:180;
+        forces[1]=add(gravity,result.forces.impulses[1]);
+        for(const unsigned axis:{4u,5u})
+            forces[axis]=sub(forces[axis],wrap(signed_word(body.word(0x2e + 2*axis))/12));
+        return;
+    }
+    const int descent=signed_word(body.word(0x30));
+    if(was_airborne && descent>0) {
+        // The dampers absorb part of the approach velocity on touchdown.
+        // Keep the first rebound below a quarter of the incoming vertical speed.
+        const int touchdown=signed_word(forces[1])-descent/6;
+        forces[1]=wrap(std::max(touchdown,-descent-descent/4));
+    }
+    if(body.word(0x42)&0x40) {
+        // Supplement the wheel brakes along the chassis axis. Reduce braking
+        // with fewer tires down and taper the impulse as the car approaches rest.
+        const int speed=signed_word(body.word(0x4a))*8;
+        const int brake=std::clamp(speed/5,-20*supported,20*supported);
+        for(const unsigned axis:{0u,2u})
+            forces[axis]=sub(forces[axis],product_q15(wrap(brake),result.orientation[6+axis]));
+    }
+}
+
+static void update_drift(Vehicle& car,VehicleForces& forces,const VehicleStepEnvironment& env,bool last_callback) {
+    const auto& body=car.body;
+    const int speed=signed_word(body.word(0x4a));
+    if(speed<40 || body.word(0x44)>=3 || (body.word(0x64)&8) || (body.word(0x42)&0x1000) ||
+       (body.word(0x70)&0x80)) {
+        car.drift_ticks=0;
+        car.drift_direction=0;
+        car.drift_charge_ticks=0;
+        return;
+    }
+    constexpr unsigned recovery_ticks=4;
+    if(env.drift_held && (speed>=70 || car.drift_ticks))car.drift_ticks=recovery_ticks;
+    if(!car.drift_ticks)return;
+    const int steer=env.steering_q15 ? -int(*env.steering_q15) :
+        (body.word(0x42)&1)?32767:(body.word(0x42)&2)?-32767:0;
+    car.drift_direction=steer>4000?1:steer< -4000?-1:0;
+    const int strength=car.drift_ticks;
+    forces.rear_grip_percent=100-18*strength;
+    const int target=steer*1420/32767;
+    const int yaw=signed_word(body.word(0x34));
+    forces.words[3]=add(forces.words[3],wrap(std::clamp(target-yaw,-800,800)*strength/12));
+    if(last_callback && !env.drift_held && !--car.drift_ticks)car.drift_direction=0;
+}
+
+// Once per 14 Hz phase, after contact and crash detection.
+static void update_drift_boost(Vehicle& car,VehicleStepResult& step,bool held) {
+    auto& charge=car.drift_charge_ticks;
+    const auto& body=car.body;
+    if(!car.drift_ticks || body.word(0x44)>=3 || (body.word(0x70)&0x80)) {
+        charge=0;
+        return;
+    }
+    const int speed=signed_word(body.word(0x4a));
+    if(held) {
+        const int sideways=signed_word(product_q15(body.word(0x2e),step.orientation[0]))+
+                           signed_word(product_q15(body.word(0x32),step.orientation[2]));
+        if(car.drift_direction || std::abs(sideways)>std::max(64,speed))
+            charge=std::uint8_t(std::min(drift_boost_full_ticks,charge+1));
+        else if(charge) --charge;
+        return;
+    }
+    if(charge>=drift_boost_min_ticks) {
+        const int reward=24+(charge-drift_boost_min_ticks)*60/(drift_boost_full_ticks-drift_boost_min_ticks);
+        const int impulse=8*std::clamp(max_vehicle_speed-speed,0,reward);
+        for(unsigned axis=0;axis<3;++axis)
+            step.forces.words[axis]=add(step.forces.words[axis],product_q15(wrap(impulse),step.orientation[6+axis]));
+    }
+    charge=0;
+}
+
 VehicleStepResult update_vehicle(Vehicle& vehicle,const VehicleTuning& tuning,
     const WheelContactTuning& contact_tuning,const OpponentTuning& direction_tuning,
     VehicleDriveContext& context,const VehicleStepEnvironment& environment) {
@@ -675,15 +763,30 @@ VehicleStepResult update_vehicle(Vehicle& vehicle,const VehicleTuning& tuning,
             if(!racer)throw std::invalid_argument("Null opponent participant");
             racers.push_back(*racer);
         }
-        return update_opponent_ai(vehicle,environment.route,direction_tuning,tuning,
+        const auto previous=position();
+        const bool simulated=update_opponent_ai(vehicle,environment.route,direction_tuning,tuning,
             std::uint8_t(environment.difficulty),environment.player_rank,racers,environment.opponent_index,
             *environment.wheel_candidate_lists,result.orientation);
+        if(!simulated && environment.physics==DrivingPhysics::enhanced && position()!=previous) {
+            // Distant CPU cars interpolate a route displacement stored in the
+            // velocity words. Clip this movement, then keep the route command.
+            const auto vx=body.word(0x2e),vz=body.word(0x32),yaw_rate=body.word(0x34);
+            result.orientation=vehicle_orientation(body,tuning);
+            resolve_course_walls(vehicle,previous,result.orientation,environment.walls,environment.course_shapes);
+            body.word(0x2e)=vx;body.word(0x32)=vz;body.word(0x34)=yaw_rate;
+        }
+        return simulated;
     };
+    std::array<int,2> wall_impulse{};
     bool run_physics=!(body.word(0x1c)&0x20);
     if(run_physics && (body.word(0x1c)&0x10))run_physics=(body.word(0x64)&8) && run_ai();
     if (run_physics) {
+        const auto previous=position();
         integrate_vehicle_pose(body);
         result.orientation=vehicle_orientation(body,tuning);
+        if(environment.physics==DrivingPhysics::enhanced)
+            wall_impulse=resolve_course_walls(vehicle,previous,result.orientation,environment.walls,environment.course_shapes);
+        else if(environment.kasumi_walls)resolve_kasumi_wall(body,previous,result.orientation);
         if(body.word(0x64)&8)run_physics=run_ai();
         else {
             const auto nearest=environment.route.empty()?std::nullopt:nearest_route_point(environment.route,position());
@@ -691,8 +794,17 @@ VehicleStepResult update_vehicle(Vehicle& vehicle,const VehicleTuning& tuning,
         }
     }
     if(run_physics) {
+        const bool enhanced=environment.physics==DrivingPhysics::enhanced;
+        const bool was_airborne=body.word(0x44)==4;
         begin_vehicle_forces(body,tuning,result.forces,context.advance_timing);
         update_vehicle_controls(body,tuning,result.forces,context,environment.steering_q15);
+        if(enhanced) {
+            update_drift(vehicle,result.forces,environment,context.damage_mode!=0);
+            // Give low gears more pull and blend back into the stock power curve at speed.
+            const int drive=signed_word(body.word(0x3c));
+            const int gain=std::clamp(240-std::abs(signed_word(body.word(0x4a))),0,240);
+            body.word(0x3c)=(body.word(0x42)&0x40)?0:wrap(std::clamp(drive+drive*gain/720,-16383,16383));
+        }
         for(auto& wheel:vehicle.wheels)position_vehicle_attachment(body,wheel,result.orientation);
         body.word(0x44)=body.word(0x46)=body.word(0x56)=0;
         if(auto* guide=environment.trailer_guide) {
@@ -709,11 +821,18 @@ VehicleStepResult update_vehicle(Vehicle& vehicle,const VehicleTuning& tuning,
             body.word(0x92)|=wheel.word(0x2c);
         }
         update_vehicle_contact_state(body,tuning,result.forces);
+        if(enhanced)enhanced_contact_forces(body,result,was_airborne);
         BodyCollisionWork contact_work;
         update_body_collisions(body,result.forces,environment.body_candidates,
-                               {context.damage_mode,environment.difficulty},contact_work);
+                               {context.damage_mode,environment.difficulty,environment.physics},contact_work);
         update_vehicle_alignment(body,result.orientation);
-        if(update_vehicle_damage(body,tuning,result.forces,context))
+        // The swept wall already applied its impulse to velocity. Include it
+        // in the crash sample once without accelerating the car a second time.
+        auto crash_sample=result.forces;
+        for(unsigned i=0;i<wall_impulse.size();++i)
+            if(std::abs(wall_impulse[i])>std::abs(signed_word(crash_sample.words[i*2])))
+                crash_sample.words[i*2]=wrap(std::clamp(wall_impulse[i],-32767,32767));
+        if(update_vehicle_damage(body,tuning,crash_sample,context))
             apply_nearby_crash_impulse(body,environment.racers);
         if(body.word(0x70)&0x80) {
             std::optional<Word> desired;
@@ -729,6 +848,7 @@ VehicleStepResult update_vehicle(Vehicle& vehicle,const VehicleTuning& tuning,
             }
             update_vehicle_recovery(body,result.forces,desired,context.advance_motion_rules);
         }
+        if(enhanced && context.damage_mode)update_drift_boost(vehicle,result,environment.drift_held);
         integrate_vehicle_velocity(body,result.forces,result.orientation,context.advance_timing,
                                    context.advance_motion_rules);
     }

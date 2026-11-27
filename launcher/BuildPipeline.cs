@@ -134,6 +134,8 @@ internal sealed class BuildPipeline(string source, Action<string> report)
             await ConfigureAsync(toolchain, native, generated, Log, cancel);
             await RunAsync(toolchain.CMake, ["--build", native, "--target", "srf_preview", "--parallel", "4"], source, Log, cancel, toolchain);
             var executable = Path.Combine(native, "srf_preview.exe");
+            var replays = Path.Combine(source, "replays");
+            if (!Directory.Exists(replays)) replays = Path.Combine(source, "tests", "fixtures");
             foreach (var course in GameContent.Courses)
             {
                 var assets = GameContent.AssetDirectory(stage, course.Id);
@@ -144,10 +146,10 @@ internal sealed class BuildPipeline(string source, Action<string> report)
                     await RunAsync(executable, ["--world", world, "--race", "--rom", Path.GetFullPath(rom),
                         "--course", course.Id, "--car", car, "--steps", "50", "--width", "960", "--height", "540",
                         "--restart-check", "--screenshot-no-hud", "--screenshot", Path.Combine(stage, $"preview-{course.Id}-{car}.png")], native, Log, cancel, toolchain);
-                var replay = Path.Combine(source, "tests", "fixtures", course.Id.Replace('-', '_') + "_clean_inputs.csv");
+                var replay = Path.Combine(replays, course.Id.Replace('-', '_') + "_clean_inputs.csv");
                 foreach (var styledCar in new[] { "4wd", "coupe", "f-type" })
                 {
-                    var styleReplay = styledCar == "4wd" ? replay : Path.Combine(source, "tests", "fixtures",
+                    var styleReplay = styledCar == "4wd" ? replay : Path.Combine(replays,
                         $"{course.Id.Replace('-', '_')}_{styledCar.Replace('-', '_')}_inputs.csv");
                     foreach (var style in new[] { RaceStyle.N64, RaceStyle.Remastered })
                         await RunAsync(executable, ["--world", world, "--course", course.Id, "--car", styledCar, "--race", style == RaceStyle.N64 ? "--n64" : "--remastered", "--rom", Path.GetFullPath(rom),
@@ -163,6 +165,33 @@ internal sealed class BuildPipeline(string source, Action<string> report)
             await RunAsync(executable, ["--world", Path.Combine(generated, "world.srfworld"), "--game", "--rom", Path.GetFullPath(rom),
                 "--course", GameContent.DefaultCourse, "--screenshot", Path.Combine(stage, "native-smoke.png")], native, Log, cancel, toolchain);
             cancel.ThrowIfCancellationRequested();
+            // Authored content shares the base art pack. Generate its own previews
+            // without assigning it a stock course replay or a championship slot.
+            foreach (var course in GameContent.Courses.Concat(GameContent.CustomCourses))
+            {
+                var world = Path.Combine(GameContent.AssetDirectory(stage, course.Id), "world.srfworld");
+                string[] models = GameContent.IsCustomCourse(course.Id) ? ["coupe", "4wd", "f-type", ..GameContent.CustomCars] : GameContent.CustomCars;
+                foreach (var model in models)
+                    foreach (var style in new[] { RaceStyle.Original, RaceStyle.N64, RaceStyle.Remastered })
+                    {
+                        List<string> args = ["--world", world, "--race", "--custom-content", "--rom", Path.GetFullPath(rom),
+                            "--course", course.Id, "--car", model, "--steps", "60", "--width", "960", "--height", "540", "--screenshot-no-hud"];
+                        if (style != RaceStyle.Original) args.Add(style == RaceStyle.N64 ? "--n64" : "--remastered");
+                        var image = style == RaceStyle.Original ? $"preview-{course.Id}-{model}.png" : GameContent.StylePreview(course.Id, model, style, GameContent.CurrentVersion);
+                        args.AddRange(["--screenshot", Path.Combine(stage, image)]);
+                        await RunAsync(executable, args, native, Log, cancel, toolchain);
+                    }
+            }
+            foreach (var (course, car, fixture) in new[] {
+                (GameContent.CustomCourse, GameContent.CustomCar, "ember_mesa_kestrel_inputs.csv"),
+                (GameContent.CityCourse, GameContent.CargoCar, "kasumi_loop_cargo_inputs.csv") })
+            {
+                var replay = await RunAsync(executable, ["--world", Path.Combine(generated, "world.srfworld"),
+                    "--race", "--rom", Path.GetFullPath(rom), "--custom-content", "--course", course.Id,
+                    "--car", car, "--replay-input", Path.Combine(replays, fixture),
+                    "--restart-check", "--screenshot", Path.Combine(stage, $"race-check-{course.Id}.png")], native, Log, cancel, toolchain);
+                ValidateRaceReplay(replay, course);
+            }
             var record = new BuildRecord(id, verified.RootElement.GetRawText(), SourceDigest(),
                 toolchain.Name, toolchain.DevelopmentOnly, DateTimeOffset.UtcNow) { RomPath = Path.GetFullPath(rom), ContentVersion = GameContent.CurrentVersion };
             AtomicWrite(Path.Combine(stage, "build-record.json"), JsonSerializer.Serialize(record, JsonOptions));
@@ -261,12 +290,21 @@ internal sealed class BuildPipeline(string source, Action<string> report)
             !File.Exists(Path.Combine(stage, "native", "SDL3.dll")) ||
             !File.Exists(Path.Combine(stage, "generated", "world.srfworld")) ||
             !File.Exists(Path.Combine(stage, "generated", "sprites.srfsprites"))) return null;
+        // Portable builds keep game.sfc beside user-builds. The native game
+        // starts in builds/<id>/native, so it needs the resolved ROM path.
+        if (!string.IsNullOrWhiteSpace(record.RomPath) && !Path.IsPathFullyQualified(record.RomPath))
+        {
+            var package = Path.GetFullPath(Path.Combine(output, ".."));
+            return record with { RomPath = Path.GetFullPath(record.RomPath, package) };
+        }
         return record;
     }
 
-    internal static string[] ContentArguments(BuildRecord record, string car, bool borderless, string course = GameContent.DefaultCourse)
+    internal static string[] ContentArguments(BuildRecord record, string car, bool borderless, string course = GameContent.DefaultCourse, bool customContent = false)
     {
-        if (car is not ("4wd" or "coupe" or "f-type")) throw new ArgumentException("Unsupported car.");
+        if (GameContent.IsCustom(course, car) && (!customContent || record.ContentVersion < GameContent.RequiredCustomVersion(course, car)))
+            throw new InvalidOperationException("Enable Custom content and rebuild from Game files to race on this course or with this car.");
+        if (car is not ("4wd" or "coupe" or "f-type" or GameContent.CustomCar or GameContent.CargoCar)) throw new ArgumentException("Unsupported car.");
         var selected = GameContent.Course(course);
         if (record.ContentVersion < selected.MinimumContentVersion)
             throw new InvalidOperationException($"Rebuild from Game files to enable {selected.Name}.");
@@ -277,6 +315,7 @@ internal sealed class BuildPipeline(string source, Action<string> report)
             return [];
         }
         List<string> arguments = ["--car", car];
+        if (customContent && record.ContentVersion >= GameContent.CustomContentVersion) arguments.Add("--custom-content");
         if (borderless) arguments.Add("--borderless");
         if (record.ContentVersion >= 2) arguments.AddRange(["--course", course]);
         return [.. arguments];
@@ -297,18 +336,40 @@ internal sealed class BuildPipeline(string source, Action<string> report)
     }
 
     public static Process Launch(string output, bool inspectModels = false, int width = 1280, int height = 720,
+        RaceStyle style = RaceStyle.Original, string course = GameContent.DefaultCourse, LanGrid? lan = null,
+        string? lanCapture = null, bool lanCaptureHandoff = false, bool customContent = false) =>
+        Start(PrepareLaunch(output, inspectModels, width, height, style: style, course: course, lan: lan,
+            lanCapture: lanCapture, lanCaptureHandoff: lanCaptureHandoff, customContent: customContent));
+
+    internal static Process Start(ProcessStartInfo info) =>
+        Process.Start(info) ?? throw new InvalidOperationException("Could not start the native game.");
+
+    internal static ProcessStartInfo PrepareLaunch(string output, bool inspectModels = false, int width = 1280, int height = 720,
         string car = "4wd", bool borderless = false, string course = GameContent.DefaultCourse, bool game = false, bool vr = false,
         int desktopFps = 0, int vrRefresh = 0, int vrScale = 100, RaceStyle style = RaceStyle.Original, bool n64LowRaster = false,
         int remasteredHour = 12, int remasteredMsaa = 0, string remasteredWeather = "clear",
         string remasteredCamera = "chase", bool cameraLook = false, int maxCameraDistance = GameContent.DefaultCameraDistance, bool classicSnes = false, bool hideRaceHud = false, bool rayTracedShadows = false, bool rayTracedReflections = false, bool rayTracedIndirect = false,
-        bool materialRoughness = false, bool carClearCoat = false, bool highDetailRoad = false, bool highDetailScenery = false, int shadowRays = 4, bool wetTireSpray = false, bool volumetricLighting = false, bool smoothVrMotion = true, LanGrid? lan = null, string? lanCapture = null, bool lanCaptureHandoff = false)
+        bool materialRoughness = false, bool carClearCoat = false, bool highDetailRoad = false, bool highDetailScenery = false, int shadowRays = 4, bool wetTireSpray = false, bool volumetricLighting = false, bool smoothVrMotion = true, LanGrid? lan = null, string? lanCapture = null, bool lanCaptureHandoff = false, bool customContent = false, bool enhancedPhysics = false, bool practice = false)
     {
         var record = LastSuccess(output) ?? throw new InvalidOperationException("Build the game from Game files first.");
         var stage = Path.Combine(Path.GetFullPath(output), "builds", record.Directory);
         var info = new ProcessStartInfo(Path.Combine(stage, "native", "srf_preview.exe"))
         { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.Combine(stage, "native") };
+        bool enhanced = !game && !inspectModels && (lan?.EnhancedPhysics ?? enhancedPhysics);
+        if ((enhanced || practice) && record.ContentVersion < GameContent.EnhancedPhysicsVersion)
+            throw new InvalidOperationException("Rebuild the game from Game files for direct practice and Enhanced physics.");
+        if (enhanced) info.ArgumentList.Add("--enhanced-physics");
         if (lan != null)
         {
+            if (enhanced && record.ContentVersion < GameContent.RacerPhysicsVersion)
+                throw new InvalidOperationException("Rebuild from Game files to play LAN with Enhanced physics.");
+            if (enhanced)
+            {
+                info.ArgumentList.Add("--lan-physics-revision");
+                info.ArgumentList.Add(GameContent.RacerPhysicsVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+            if (lan.Cars.Any(id => GameContent.IsCustom(course,id) && (!customContent || record.ContentVersion < GameContent.RequiredCustomVersion(course,id))))
+                throw new InvalidOperationException("Enable Custom content and rebuild from Game files for this grid.");
             if (game || vr || !GameContent.LanCourseVersions.TryGetValue(course, out var minimum) || record.ContentVersion < Math.Max(minimum,GameContent.FourDriverLanVersion))
                 throw new InvalidOperationException("Build the current game from Game files to play this LAN course.");
             info.RedirectStandardInput = info.RedirectStandardOutput = true;
@@ -430,8 +491,8 @@ internal sealed class BuildPipeline(string source, Action<string> report)
             }
             if (game) course = GameContent.DefaultCourse;
             if (game) car = "4wd";
-            var contentArguments = ContentArguments(record, car, borderless, course);
-            var entryPoint = EntryPointArgument(record, game);
+            var contentArguments = ContentArguments(record, car, borderless, course, customContent);
+            var entryPoint = practice ? "--practice" : EntryPointArgument(record, game);
             var world = Path.Combine(GameContent.AssetDirectory(stage, course), "world.srfworld");
             if (!File.Exists(world)) throw new FileNotFoundException("The selected course is missing from this build. Rebuild from Game files.", world);
             if (string.IsNullOrWhiteSpace(record.RomPath) || !File.Exists(record.RomPath))
@@ -455,7 +516,7 @@ internal sealed class BuildPipeline(string source, Action<string> report)
                 info.ArgumentList.Add(Path.Combine(Path.GetFullPath(output), "speed-trax.sav"));
             }
         }
-        return Process.Start(info) ?? throw new InvalidOperationException("Could not start the native game.");
+        return info;
     }
 
     internal static bool IsWithin(string path, string root) => Path.GetFullPath(path).StartsWith(

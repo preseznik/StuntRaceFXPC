@@ -7,7 +7,7 @@ using Mesh = std::vector<Face>;
 constexpr unsigned f_type_player_shell=0xa200, f_type_rival_shell=0xa7e8;
 constexpr unsigned coupe_player_shell=0xa2a8, coupe_rival_shell=0xa804;
 bool original_player_shell(unsigned descriptor) {
-    return descriptor==coupe_player_shell || descriptor==f_type_player_shell;
+    return descriptor==srf::cargo_shell || descriptor==srf::kestrel_shell || descriptor==coupe_player_shell || descriptor==f_type_player_shell;
 }
 float tire_radius(const RenderSprite& wheel) {return wheel.diameter*.43f;}
 
@@ -281,7 +281,7 @@ void draw_car(std::vector<GpuVertex>& triangles,const RenderVehicle& car,bool n6
         draw(dash,car.position,1,car.orientation);
     } else if(interior) {
         static const Mesh cockpit=rally_cockpit(),coupe_cockpit=rally_cockpit(true);
-        draw(car.descriptor==coupe_player_shell?coupe_cockpit:cockpit,car.position,1,car.orientation);
+        draw((car.descriptor==coupe_player_shell || car.descriptor==srf::kestrel_shell)?coupe_cockpit:cockpit,car.position,1,car.orientation);
         return;
     }
     const bool rally_player=car.remote_rally_truck || (car.player && !original_player_shell(car.descriptor));

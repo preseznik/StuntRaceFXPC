@@ -35,14 +35,15 @@ foreach ($directory in @('src', 'include')) {
         Copy-Item -LiteralPath $file.FullName -Destination $target -Force
     }
 }
-# BuildPipeline replays these inputs to render previews and validate the local build.
-$fixtures = Join-Path $source 'tests/fixtures'
-New-Item -ItemType Directory -Path $fixtures -Force | Out-Null
-Get-ChildItem -LiteralPath (Join-Path $root 'tests/fixtures') -Filter '*_inputs.csv' -File |
-    Where-Object {
-        $_.Name -match '_(clean|coupe|f_type)_inputs\.csv$' -or
-        $_.Name -in @('ember_mesa_kestrel_inputs.csv', 'kasumi_loop_cargo_inputs.csv')
-    } | Copy-Item -Destination $fixtures
+# Ship only the driving inputs BuildPipeline uses for previews and build validation.
+$replays = New-Item -ItemType Directory -Path (Join-Path $source 'replays') -Force
+$replayNames = foreach ($course in @('easy_ride', 'aqua_tunnel', 'sunset_valley', 'night_owl', 'kings_forest', 'sea_breeze',
+                                     'white_land', 'night_cruise', 'lake_side', 'big_ravine', 'sky_ramp', 'harbor_city')) {
+    foreach ($driver in @('clean', 'coupe', 'f_type')) { "${course}_${driver}_inputs.csv" }
+}
+foreach ($name in ($replayNames + 'ember_mesa_kestrel_inputs.csv' + 'kasumi_loop_cargo_inputs.csv')) {
+    Copy-Item -LiteralPath (Join-Path $root "tests/fixtures/$name") -Destination $replays.FullName
+}
 
 if ($BundleToolchain) {
     $manifestPath = Join-Path $root '.tools/toolchain.json'

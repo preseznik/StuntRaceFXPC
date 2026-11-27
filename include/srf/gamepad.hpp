@@ -1,4 +1,5 @@
 #pragma once
+#include "srf/driving_input.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <memory>

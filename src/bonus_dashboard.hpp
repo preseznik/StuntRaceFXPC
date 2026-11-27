@@ -30,7 +30,7 @@ public:
         :stunt_(stunt),backing_(256*40),frame_(256*40),sprites_(extract_bonus_hud_tiles(rom)),
          palette_(bonus_hud_palette(rom,0xf8960)),damage_palette_(bonus_hud_palette(rom,0xf89c0)) {
         static constexpr unsigned icons[]{1,2,0}; // COUPE, 4WD, F-TYPE
-        auto tiles=stunt?unpack_rom_graphics(rom,0x18f938):extract_bonus_dashboard_tiles(rom,icons[static_cast<unsigned>(car)]);
+        auto tiles=stunt?unpack_rom_graphics(rom,0x18f938):extract_bonus_dashboard_tiles(rom,icons[static_cast<unsigned>(chassis(car))]);
         if(stunt) {
             const auto labels=unpack_rom_graphics(rom,0x18fa38);
             if(tiles.size()!=38*64 || labels.size()!=10*64)throw std::runtime_error("Invalid Stunt Trax dashboard");
