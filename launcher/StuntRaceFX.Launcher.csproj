@@ -10,4 +10,14 @@
     <AssemblyName>StuntRaceFX.Launcher</AssemblyName>
     <Version>0.1.0</Version>
   </PropertyGroup>
+  <Target Name="CopyRuntimeNotices" AfterTargets="Publish" Condition="'$(SelfContained)' == 'true'">
+    <ItemGroup>
+      <_RuntimeNotice Include="%(ResolvedRuntimePack.PackageDirectory)/LICENSE*;%(ResolvedRuntimePack.PackageDirectory)/THIRD-PARTY-NOTICES*"
+                      Condition="'%(ResolvedRuntimePack.PackageDirectory)' != ''">
+        <Pack>%(ResolvedRuntimePack.NuGetPackageId)</Pack>
+      </_RuntimeNotice>
+    </ItemGroup>
+    <Copy SourceFiles="@(_RuntimeNotice)"
+          DestinationFiles="@(_RuntimeNotice->'$(PublishDir)licenses/%(Pack)/%(Filename)%(Extension)')" />
+  </Target>
 </Project>

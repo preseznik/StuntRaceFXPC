@@ -1,13 +1,37 @@
 /artifacts/
 /build/
 /out/
-/research/upstream/
-/research/reference/captures/
-/research/reference/bin/
-/research/reference/downloads/
-/research/reference/vendor/
 /.tools/
-**/__pycache__/
+
+# Local research, internal documentation and standalone validation.
+/docs/
+/research/
+/tools/*
+!/tools/Bootstrap-Dependencies.ps1
+!/tools/Bootstrap-OpenXR.ps1
+!/tools/Bootstrap-Toolchain.ps1
+!/tools/Build-Launcher.ps1
+!/tools/private_desktop.cpp
+!/tools/validate_game_flow.py
+/tests/*.ps1
+/tests/test_*.py
+/tests/lan_capacity/
+/tests/compression_coherence_tests.cpp
+/tests/compression_impulse_tests.cpp
+/tests/contact_regime_tests.cpp
+/tests/coupled_integration_tests.cpp
+/tests/departure_breakaway_tests.cpp
+/tests/departure_order_tests.cpp
+/tests/grounded_axes_tests.cpp
+/tests/landing_branch_tests.cpp
+/tests/suspension_transition_tests.cpp
+/tests/wheel_coast_tests.cpp
+/tests/fixtures/*.md
+/tests/fixtures/*_reference_inputs.csv
+/tests/fixtures/easy_ride_novice_grid_inputs.csv
+/tests/fixtures/xrsim_headset.json
+
+# ROMs, local build data, saves and captures.
 *.sfc
 *.smc
 *.srm
@@ -15,8 +39,12 @@
 *.snapshot
 *.rom
 *.spc
-
-# The ROM extractor and launcher accept an arbitrary output directory.
+*.sav
+*.zip
+*.7z
+*.rar
+*.log
+*.dmp
 generated/
 user-builds/
 *.srfmesh
@@ -33,10 +61,16 @@ launcher-settings.json
 last-success.json
 build-record.json
 controller.ini
-*.sav
-openxr-last-drive.log
 
-# Native builds made outside the usual build and artifacts directories.
+# Local development settings and build outputs.
+.vs/
+.vscode/
+.idea/
+.env
+.env.*
+CMakeUserPresets.json
+*.user
+__pycache__/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -50,5 +84,5 @@ build.ninja
 *.o
 *.obj
 *.pdb
-**/bin/
-**/obj/
+bin/
+obj/
