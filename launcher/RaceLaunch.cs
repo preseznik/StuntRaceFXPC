@@ -34,7 +34,7 @@ internal static class RaceLaunch
         var display = Display(s, lanStyle.HasValue ? StyleName(style) : Profile(s));
         var dimensions = display.Resolution.Split('x', StringSplitOptions.TrimEntries);
         var version = BuildPipeline.LastSuccess(s.OutputPath)?.ContentVersion ?? 0;
-        return BuildPipeline.PrepareLaunch(s.OutputPath, width: int.Parse(dimensions[0]), height: int.Parse(dimensions[1]),
+        var launch = BuildPipeline.PrepareLaunch(s.OutputPath, width: int.Parse(dimensions[0]), height: int.Parse(dimensions[1]),
             car: Car(s), borderless: display.Borderless, course: lan?.Course ?? (s.QuickRace ? Course(s) : GameContent.DefaultCourse),
             game: lan == null && !s.QuickRace, vr: vr, style: style, desktopFps: display.DesktopFps,
             vrRefresh: s.VrRefresh, vrScale: s.VrScale, smoothVrMotion: s.SmoothVrMotion, n64LowRaster: s.N64LowRaster && version >= GameContent.N64RasterVersion,
@@ -44,6 +44,9 @@ internal static class RaceLaunch
             materialRoughness: quality.MaterialRoughness, carClearCoat: quality.CarClearCoat, highDetailRoad: quality.HighDetailRoad, highDetailScenery: quality.HighDetailScenery,
             shadowRays: quality.ShadowRays, wetTireSpray: quality.WetTireSpray, volumetricLighting: quality.VolumetricLighting, lan: lan, customContent: s.CustomContent,
             enhancedPhysics: s.EnhancedPhysics, practice: practice);
+        if (vr && !string.IsNullOrEmpty(s.VrRuntime))
+            launch.Environment["XR_RUNTIME_JSON"] = OpenXrRuntime.Resolve(s.VrRuntime);
+        return launch;
     }
 
     internal static LauncherSettings Read(string path)
@@ -55,6 +58,7 @@ internal static class RaceLaunch
             using var doc = JsonDocument.Parse(File.ReadAllText(path));
             if (doc.RootElement.ValueKind != JsonValueKind.Object) throw new JsonException("Expected a launcher settings object.");
             s = doc.RootElement.Deserialize<LauncherSettings>(BuildPipeline.JsonOptions) ?? s;
+            s = s with { VrRuntime = OpenXrRuntime.SavedChoice(doc.RootElement, s.VrRuntime) };
             legacyN64 = !doc.RootElement.TryGetProperty("N64Mode", out _) && doc.RootElement.TryGetProperty("Remastered", out var old) && old.ValueKind == JsonValueKind.True;
         }
         bool legacy = s.QuickRaceStyle == null && (s.N64Mode || legacyN64 || s.RemasteredMode);
@@ -65,7 +69,7 @@ internal static class RaceLaunch
         string ValidCar(string id) => LanLobby.Cars.Contains(id) || s.CustomContent && GameContent.CustomCars.Contains(id) ? id : "4wd";
         return s with
         {
-            OutputPath = string.IsNullOrWhiteSpace(s.OutputPath) ? Path.Combine(AppContext.BaseDirectory, "user-builds") : s.OutputPath,
+            OutputPath = string.IsNullOrWhiteSpace(s.OutputPath) ? Path.Combine(LauncherUpdate.Home, "user-builds") : s.OutputPath,
             QuickRace = !s.NormalVr && (s.QuickRace || s.EasyRideVr || legacy),
             EasyRideVr = !legacy && s.EasyRideVr,
             QuickRaceStyle = legacy ? s.RemasteredMode ? "Remastered" : "N64" : s.QuickRaceStyle ?? "Original",

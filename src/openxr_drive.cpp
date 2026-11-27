@@ -160,6 +160,9 @@ struct Drive::Impl {
         require(xrGetInstanceProperties(instance,&props),"Reading runtime");log<<"Runtime "<<props.runtimeName<<std::endl;
         XrSystemGetInfo si{XR_TYPE_SYSTEM_GET_INFO,nullptr,XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY};
         require(xrGetSystem(instance,&si,&system),"Finding connected headset");
+        XrSystemProperties system_props{XR_TYPE_SYSTEM_PROPERTIES};
+        if(XR_SUCCEEDED(xrGetSystemProperties(instance,system,&system_props)) && system_props.systemName[0])
+            log<<"Headset "<<system_props.systemName<<std::endl;
         auto modes=enumerate(XrEnvironmentBlendMode{},[&](auto n,auto* c,XrEnvironmentBlendMode* p){
             return xrEnumerateEnvironmentBlendModes(instance,system,stereo,n,c,p);},"Checking stereo display mode");
         if(std::find(modes.begin(),modes.end(),XR_ENVIRONMENT_BLEND_MODE_OPAQUE)==modes.end())
@@ -256,17 +259,21 @@ struct Drive::Impl {
                     auto next=space(XR_REFERENCE_SPACE_TYPE_LOCAL,seat_origin(loc.pose));xrDestroySpace(seat);seat=next;seat_ready=true;recenter=false;++recenters;
                 }
             }
-            XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO,nullptr,stereo,f.predictedDisplayTime,seat};
+            // SteamVR can wait for the first layer before granting focus. Use view space
+            // for that initial image until a focused, tracked pose establishes the seat.
+            const XrSpace render_space=seat_ready?seat:head;
+            XrViewLocateInfo locate{XR_TYPE_VIEW_LOCATE_INFO,nullptr,stereo,f.predictedDisplayTime,render_space};
             XrView views[2]={{XR_TYPE_VIEW},{XR_TYPE_VIEW}};
             XrViewState vs{XR_TYPE_VIEW_STATE};uint32_t count{};
             if(f.shouldRender)require(xrLocateViews(session,&locate,&vs,2,&count,views),"Locating eyes at display time");
             const auto valid=XR_VIEW_STATE_POSITION_VALID_BIT|XR_VIEW_STATE_ORIENTATION_VALID_BIT;
-            const bool visible=seat_ready && f.shouldRender && count==2 && (vs.viewStateFlags&valid)==valid;
-            auto display=update(f.predictedDisplayTime,visible && state==XR_SESSION_STATE_FOCUSED);
+            const bool visible=f.shouldRender && count==2 && (vs.viewStateFlags&valid)==valid;
+            const bool driving=visible && seat_ready && state==XR_SESSION_STATE_FOCUSED;
+            auto display=update(f.predictedDisplayTime,driving);
             recenter|=display.recenter;
             XrCompositionLayerProjectionView pv[2]={{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
-            XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION,nullptr,0,seat,2,pv};
-            XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD,nullptr,0,seat,XR_EYE_VISIBILITY_BOTH,{},
+            XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION,nullptr,0,render_space,2,pv};
+            XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD,nullptr,0,render_space,XR_EYE_VISIBILITY_BOTH,{},
                                        {{0,0,0,1},{0,-.06f,-1.45f}},{1.6f,1.2f}};
             const XrCompositionLayerBaseHeader* layers[]={reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
                                                          reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
@@ -310,7 +317,7 @@ struct Drive::Impl {
             }
             // Layer structures must remain alive through xrEndFrame.
             auto result=xrEndFrame(session,&end);end.type=XR_TYPE_UNKNOWN;require(result,"Submitting stereo frame");
-            if(visible && pixels.empty() && state==XR_SESSION_STATE_FOCUSED){
+            if(driving && pixels.empty()){
                 const auto now=std::chrono::steady_clock::now();
                 if(last_submission!=std::chrono::steady_clock::time_point{}){
                     submission_seconds+=std::chrono::duration<double>(now-last_submission).count();++submission_intervals;

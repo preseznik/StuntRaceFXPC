@@ -83,6 +83,8 @@ if ($BundleToolchain) {
     }
 }
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $output
+$buildNumber = (Get-Item -LiteralPath (Join-Path $output 'StuntRaceFX.Launcher.exe')).VersionInfo.FileBuildPart
+Copy-Item -LiteralPath (Join-Path $root "StuntRaceFXPC-Build-$buildNumber-Release-Notes.txt") -Destination $output
 Copy-Item -LiteralPath (Join-Path $root 'THIRD_PARTY_NOTICES.md') -Destination $output
 Write-Host "Launcher package: $output"
 Write-Host 'The package contains the native course sources and tools for local ROM extraction.'

@@ -128,6 +128,22 @@ internal partial class GridWindow
         if (profile == "VR")
         {
             var headset = Group("VR headset");
+            var runtimes = OpenXrRuntime.Choices(settings.VrRuntime);
+            var selected = runtimes.First(r => r.Id.Equals(settings.VrRuntime, StringComparison.OrdinalIgnoreCase));
+            Pick(headset, "OpenXR runtime", runtimes, selected, r => settings = settings with { VrRuntime = r.Id });
+            ActionButton(headset, "Choose runtime file…", () =>
+            {
+                var pick = new Microsoft.Win32.OpenFileDialog { Filter = "OpenXR runtime manifests (*.json)|*.json" };
+                if (pick.ShowDialog(this) != true) return;
+                try
+                {
+                    OpenXrRuntime.ReadManifest(pick.FileName);
+                    settings = settings with { VrRuntime = pick.FileName };
+                    ShowSettings("Graphics");
+                }
+                catch (Exception e) when (OpenXrRuntime.DiscoveryError(e)) { Say(e.Message); }
+            });
+            Hint(headset, OpenXrRuntime.LastSession(installed.Stage));
             Pick(headset, "Refresh rate", new[] { 0, 72, 80, 90, 120, 144 }, settings.VrRefresh, v => settings = settings with { VrRefresh = v }, format: v => v == 0 ? "Runtime default" : $"{v} Hz");
             Pick(headset, "Eye resolution", new[] { 60, 75, 85, 100 }, settings.VrScale, v => settings = settings with { VrScale = v }, format: v => $"{v}%");
             Toggle(headset, "Smooth vehicle motion", settings.SmoothVrMotion, v => settings = settings with { SmoothVrMotion = v }, installed.Version >= GameContent.VrStyleVersion);
@@ -225,8 +241,16 @@ internal partial class GridWindow
         Hint(keyboard, "W / Up   Accelerate       S / Down   Brake       A / D   Steer\nSpace   Boost       Hold Shift   Drift (Enhanced)       X   Reverse\nR   Retire or restart       P   Pause       F11   Fullscreen");
     }
 
+    private readonly UpdatePrompt updatePrompt = new();
+    private Task CheckUpdates(bool manual) => updatePrompt.Check(manual,
+        () => !closed && IsVisible && loadError == null && build == null && !starting && !connecting && lobby is not { Closed: false },
+        () => new System.Windows.Interop.WindowInteropHelper(this).Handle,
+        () => { Program.SwitchInterface(settingsFile, CurrentSettings(), false); switchingInterface = true; Close(); });
+
     private void FilesSettings()
     {
+        var updates = Group($"Launcher · Build {GameContent.CurrentVersion}");
+        ActionButton(updates, "Check for updates", () => _ = CheckUpdates(true), build == null && lobby is not { Closed: false });
         var group = Group("Local game files");
         if (buildReadError != null) Hint(group, buildReadError);
         var rom = new TextBox { Text = settings.RomPath, IsEnabled = build == null };

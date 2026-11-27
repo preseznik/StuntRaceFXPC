@@ -22,18 +22,25 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        try { if (LauncherUpdate.Forward(args) is int result) return result; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            const string fallback = "Could not open the installed update. Starting this copy of the launcher.";
+            if (args.Length == 0 || args[0] is "--classic" or "--modern") MessageBox.Show(fallback + Environment.NewLine + ex.Message);
+            else Console.Error.WriteLine(fallback + " " + ex.Message);
+        }
         if (args.Length != 0 && args[0] is not ("--classic" or "--modern"))
             return CommandLine.RunAsync(args).GetAwaiter().GetResult();
         if (args.Length > 1 && (args.Length != 3 || args[1] != "--settings"))
             return 2;
 
-        string path = args.Length == 3 ? Path.GetFullPath(args[2]) : Path.Combine(AppContext.BaseDirectory, "launcher-settings.json");
+        string path = args.Length == 3 ? Path.GetFullPath(args[2]) : Path.Combine(LauncherUpdate.Home, "launcher-settings.json");
         LauncherSettings settings;
         string? error = null;
         try { settings = RaceLaunch.Read(path); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException)
         {
-            settings = new LauncherSettings(OutputPath: Path.Combine(AppContext.BaseDirectory, "user-builds"));
+            settings = new LauncherSettings(OutputPath: Path.Combine(LauncherUpdate.Home, "user-builds"));
             error = $"Could not load launcher settings. {e.Message}";
         }
         if (args.FirstOrDefault() == "--classic" || (args.Length == 0 && settings.ClassicLauncher))

@@ -1,0 +1,18 @@
+Stunt Race FX PC — Build 131
+Changes since Build 130
+
+VR headsets and runtimes
+
+Open Settings → Graphics, select the VR profile, and choose the OpenXR runtime for this game. Automatic follows your configured runtime. You can also select SteamVR, Virtual Desktop (VDXR), another installed runtime such as Oculus OpenXR, or a custom runtime JSON file. The panel shows the runtime and headset reported by the game after a VR launch.
+
+SteamVR now receives a stereo image while it is bringing the game into focus. This fixes a startup stall on headsets that previously stayed in SteamVR while the game waited to begin driving.
+
+Launcher updates
+
+The portable launcher checks GitHub Releases when it opens. When a newer stable build is available, it shows the download size and asks whether to install it. You can also choose Settings → Game files → Check for updates in either launcher interface.
+
+The launcher verifies the ZIP against GitHub’s SHA-256 digest before activating it. You can restart immediately or keep playing and pick up the update next time. Your original shortcut, ROM path, settings and local game builds continue to work. Downloaded versions live under .launcher-updates in the portable folder.
+
+Updating from Build 130
+
+Download StuntRaceFXPC-Portable-Launcher-Build-131.zip and extract it over your existing portable launcher with the launcher closed. This is the one manual update needed to get the updater. Open Settings → Game files and choose Build game once with your own Stunt Race FX (USA) (Rev 1) ROM to get the SteamVR fix and headset reporting in the game.

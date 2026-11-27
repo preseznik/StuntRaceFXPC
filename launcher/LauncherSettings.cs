@@ -16,7 +16,7 @@ internal sealed record LauncherSettings(string RomPath = "", string OutputPath =
     int RemasteredMsaa = 0, string RemasteredWeather = "clear", string RemasteredCamera = "chase", bool CameraLook = false,
     int MaxCameraDistance = GameContent.DefaultCameraDistance, string? QuickRaceStyle = null, string? NormalStyle = null, bool NormalVr = false, string VrCar = "4wd", bool ClassicSnes = false, bool HideRaceHud = false, bool RayTracedShadows = false, bool RayTracedReflections = false, bool RayTracedIndirect = false, bool MaterialRoughness = false, bool CarClearCoat = false, bool HighDetailRoad = false, bool HighDetailScenery = false, int ShadowRays = 4, bool WetTireSpray = false, bool VolumetricLighting = false, string? VrStyle = null, bool SmoothVrMotion = true, bool CustomContent = false, string? LauncherTheme = null, bool ClassicLauncher = false, string? WpfTheme = null,
     string DesktopQualityPreset = "Custom", RemasteredQuality? VrQuality = null, bool EnhancedPhysics = false,
-    LauncherWindowSize? WindowSize = null);
+    LauncherWindowSize? WindowSize = null, string VrRuntime = "");
 
 internal sealed record RemasteredQuality(
     int RemasteredMsaa = 0, bool RayTracedShadows = false, bool RayTracedReflections = false,

@@ -17,7 +17,7 @@ namespace {
 void ensure(bool test){if(!test)throw std::runtime_error("Invalid OpenXR frame or resource lifetime in test runtime");}
 struct Chain {ComPtr<ID3D11Texture2D> color;int state{},released{};};
 std::array<Chain,3> chains;
-struct Space {XrPosef origin;};
+struct Space {XrPosef origin;XrReferenceSpaceType type;};
 ComPtr<ID3D11Device> gpu;
 int chain_count{},events{},frame{-2},submissions{},recenter_count{};
 bool waited{},begun{},session_running{};
@@ -63,6 +63,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateInstance(const XrInstanceCreateInfo* info
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrGetInstanceProperties(XrInstance,XrInstanceProperties* p){strcpy(p->runtimeName,"Windowless test runtime");return XR_SUCCESS;}
 XRAPI_ATTR XrResult XRAPI_CALL xrGetSystem(XrInstance,const XrSystemGetInfo*,XrSystemId* p){*p=1;return XR_SUCCESS;}
+XRAPI_ATTR XrResult XRAPI_CALL xrGetSystemProperties(XrInstance,XrSystemId,XrSystemProperties* p){strcpy(p->systemName,"Test headset");return XR_SUCCESS;}
 XRAPI_ATTR XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance,const char* name,PFN_xrVoidFunction* p){
     if(!strcmp(name,"xrGetD3D11GraphicsRequirementsKHR"))*p=reinterpret_cast<PFN_xrVoidFunction>(requirements);
     else if(!strcmp(name,"xrEnumerateDisplayRefreshRatesFB"))*p=reinterpret_cast<PFN_xrVoidFunction>(refresh_choices);
@@ -75,7 +76,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateSession(XrInstance,const XrSessionCreateI
     gpu=static_cast<const XrGraphicsBindingD3D11KHR*>(info->next)->device;*out=reinterpret_cast<XrSession>(1);return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrCreateReferenceSpace(XrSession,const XrReferenceSpaceCreateInfo* info,XrSpace* p){
-    *p=reinterpret_cast<XrSpace>(new Space{info->poseInReferenceSpace});
+    *p=reinterpret_cast<XrSpace>(new Space{info->poseInReferenceSpace,info->referenceSpaceType});
     if(info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_LOCAL && info->poseInReferenceSpace.position.y!=0){
         ensure(std::abs(info->poseInReferenceSpace.position.y-1.2f)<.001f);++recenter_count;
     }return XR_SUCCESS;
@@ -101,10 +102,11 @@ XRAPI_ATTR XrResult XRAPI_CALL xrReleaseSwapchainImage(XrSwapchain s,const XrSwa
 XRAPI_ATTR XrResult XRAPI_CALL xrPollEvent(XrInstance,XrEventDataBuffer* b){
     XrSessionState state;
     if(events==0)state=XR_SESSION_STATE_READY;
-    else if(events==1)state=XR_SESSION_STATE_VISIBLE;
-    else if(events==2 && frame>=-1)state=XR_SESSION_STATE_FOCUSED;
-    else if(frame==6 && events==3)state=XR_SESSION_STATE_STOPPING;
-    else if(frame==6 && events==4)state=XR_SESSION_STATE_EXITING;
+    else if(events==1)state=XR_SESSION_STATE_SYNCHRONIZED;
+    else if(events==2 && submissions>0)state=XR_SESSION_STATE_VISIBLE;
+    else if(events==3)state=XR_SESSION_STATE_FOCUSED;
+    else if(frame==6 && events==4)state=XR_SESSION_STATE_STOPPING;
+    else if(frame==6 && events==5)state=XR_SESSION_STATE_EXITING;
     else return XR_EVENT_UNAVAILABLE;
     auto* event=reinterpret_cast<XrEventDataSessionStateChanged*>(b);event->type=XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED;event->state=state;++events;return XR_SUCCESS;
 }
@@ -124,8 +126,9 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace,XrSpace,XrTime time,XrSpace
 XRAPI_ATTR XrResult XRAPI_CALL xrLocateViews(XrSession,const XrViewLocateInfo* info,XrViewState* state,uint32_t n,uint32_t* count,XrView* views){
     ensure(info->displayTime==display_time() && n==2);*count=2;
     state->viewStateFlags=XR_VIEW_STATE_ORIENTATION_VALID_BIT;if(frame!=5)state->viewStateFlags|=XR_VIEW_STATE_POSITION_VALID_BIT;
-    const auto& origin=reinterpret_cast<Space*>(info->space)->origin;
     auto head=physical_head();
+    const auto* space=reinterpret_cast<Space*>(info->space);
+    const auto& origin=space->type==XR_REFERENCE_SPACE_TYPE_VIEW?head:space->origin;
     const float yaw=2*(std::atan2(head.orientation.y,head.orientation.w)-std::atan2(origin.orientation.y,origin.orientation.w));
     for(int i=0;i<2;++i){
         const float side=i?.032f:-.032f;
@@ -135,11 +138,12 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateViews(XrSession,const XrViewLocateInfo* i
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession,const XrFrameEndInfo* end){
     ensure(begun && end->displayTime==display_time());begun=false;
-    if(frame<=0 || frame==4 || frame==5){ensure(end->layerCount==0);return XR_SUCCESS;}
+    if(frame==4 || frame==5){ensure(end->layerCount==0);return XR_SUCCESS;}
     const bool hud=chain_count==3 && frame!=2;
     ensure(end->layerCount==(hud?2u:1u));++submissions;
     auto* p=reinterpret_cast<const XrCompositionLayerProjection*>(end->layers[0]);
     ensure(p->type==XR_TYPE_COMPOSITION_LAYER_PROJECTION && p->viewCount==2);
+    ensure(reinterpret_cast<Space*>(p->space)->type==(frame<=0?XR_REFERENCE_SPACE_TYPE_VIEW:XR_REFERENCE_SPACE_TYPE_LOCAL));
     ensure(p->views[0].pose.position.x<p->views[1].pose.position.x);
     if(hud){
         auto* h=reinterpret_cast<const XrCompositionLayerQuad*>(end->layers[1]);
@@ -155,7 +159,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrDestroySwapchain(XrSwapchain s){auto c=reinterp
 XRAPI_ATTR XrResult XRAPI_CALL xrDestroySession(XrSession){gpu.Reset();return XR_SUCCESS;}
 XRAPI_ATTR XrResult XRAPI_CALL xrDestroyInstance(XrInstance){return XR_SUCCESS;}
 }
-void verify_test_runtime(){ensure(!session_running && submissions==4 && recenter_count==2 && !waited && !begun);}
+void verify_test_runtime(){ensure(!session_running && submissions==6 && recenter_count==2 && !waited && !begun);}
 ID3D11Texture2D* test_hud_texture(){return chains[2].color.Get();}
 void reset_test_runtime(bool refresh){
     ensure(!session_running && !gpu);chains={};chain_count=events=submissions=recenter_count=0;frame=-2;

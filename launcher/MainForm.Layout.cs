@@ -130,7 +130,16 @@ internal sealed partial class MainForm
         graphicsColumns.SizeChanged += (_,_) => ArrangeGraphics();
         AddSection(deviceCard, "Desktop display", Hint("Window mode", 2), windowMode, Hint("Window resolution", 2), resolution,
             fpsLabel, desktopFps, hideRaceHud, Hint("F11 switches window mode during a race."));
-        AddSection(deviceCard, "VR headset", Hint("Preferred refresh", 2), vrRefresh, Hint("Eye resolution", 2), vrScale, smoothVrMotion,
+        var browseRuntime = new Button { Text = "Choose runtime file…", AutoSize = true };
+        browseRuntime.Click += (_, _) =>
+        {
+            using var pick = new OpenFileDialog { Filter = "OpenXR runtime manifests (*.json)|*.json" };
+            if (pick.ShowDialog(this) != DialogResult.OK) return;
+            try { OpenXrRuntime.ReadManifest(pick.FileName); RestoreVrRuntime(pick.FileName); }
+            catch (Exception e) when (OpenXrRuntime.DiscoveryError(e)) { ShowError(e); }
+        };
+        AddSection(deviceCard, "VR headset", Hint("OpenXR runtime", 2), vrRuntime, browseRuntime, lastVrSession,
+            Hint("Preferred refresh", 2), vrRefresh, Hint("Eye resolution", 2), vrScale, smoothVrMotion,
             Hint("Lower eye resolution reduces GPU work. The HUD stays at full resolution."));
         styleCard.Controls.AddRange([classicSnes, n64LowRaster, remasteredOptions]);
         remasteredOptions.Controls.Add(LauncherDesign.FieldBox("Anti-aliasing", msaa));
@@ -144,6 +153,13 @@ internal sealed partial class MainForm
         shadowQuality.ValueChanged += (_, _) => shadowQualityLabel.Text = shadowQuality.Value switch {
             0 => "Shadow quality: Performance (1 ray)", 1 => "Shadow quality: Balanced (2 rays)", _ => "Shadow quality: High (4 rays)"
         };
+    }
+
+    private void RestoreVrRuntime(string selected)
+    {
+        var choices = OpenXrRuntime.Choices(selected);
+        vrRuntime.DataSource = choices;
+        vrRuntime.SelectedItem = choices.First(r => r.Id.Equals(selected, StringComparison.OrdinalIgnoreCase));
     }
 
     private void BrowseCourses()

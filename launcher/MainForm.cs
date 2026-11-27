@@ -73,6 +73,8 @@ internal sealed partial class MainForm : Form
     private readonly ComboBox desktopFps = Choices("DesktopFps", "Desktop driving frame limit", " FPS", "Display sync", 0, 30, 60, 90, 120, 144);
     private readonly ComboBox vrRefresh = Choices("VrRefresh", "Preferred headset refresh", " Hz", "Runtime default", 0, 72, 80, 90, 120, 144);
     private readonly CheckBox smoothVrMotion = new() { Name = "SmoothVrMotion", Text = "Smooth Quick Race vehicle motion", AutoSize = true, Checked = true };
+    private readonly ComboBox vrRuntime = new() { Name = "VrRuntime", AccessibleName = "OpenXR runtime", DropDownStyle = ComboBoxStyle.DropDownList, Width = 260 };
+    private readonly Label lastVrSession = Hint("");
     private readonly ComboBox vrScale = Choices("VrScale", "VR eye resolution", "%", "", 100, 85, 75, 60);
     private readonly Button cancel = new() { Text = "Cancel build", AutoSize = true, Enabled = false };
     private readonly Label status = new() { Text = "Select your ROM in Game files to begin.", AutoSize = true, Dock = DockStyle.Fill };
@@ -103,7 +105,7 @@ internal sealed partial class MainForm : Form
 
     public MainForm(string? settingsPath = null)
     {
-        settingsFile = settingsPath ?? Path.Combine(AppContext.BaseDirectory, "launcher-settings.json");
+        settingsFile = settingsPath ?? Path.Combine(LauncherUpdate.Home, "launcher-settings.json");
         Text = "Stunt Race FX PC";
         ClientSize = new Size(1100, 800); MinimumSize = new Size(820, 620);
         StartPosition = FormStartPosition.CenterScreen; Font = new Font("Segoe UI", 10); AutoScaleMode = AutoScaleMode.Dpi;
@@ -162,6 +164,10 @@ internal sealed partial class MainForm : Form
         status.TextChanged += (_, _) => buildStatus.Text = status.Text;
         files.Controls.Add(buildStatus);
         var logCard = LauncherDesign.CardBox("Build log"); filesStack.Controls.Add(logCard);
+        var updates = LauncherDesign.CardBox($"Launcher · Build {GameContent.CurrentVersion}"); filesStack.Controls.Add(updates);
+        var checkUpdates = new Button { Text = "Check for updates", AutoSize = true };
+        updates.Controls.Add(checkUpdates);
+        checkUpdates.Click += async (_, _) => await CheckUpdates(true);
         log.Dock = DockStyle.Top; log.Height = 150;
         logCard.Controls.Add(log); logCard.Controls.Add(inspect);
 
@@ -256,6 +262,7 @@ internal sealed partial class MainForm : Form
         };
         Resize += (_, _) => { if (WindowState != FormWindowState.Minimized) maximized = WindowState == FormWindowState.Maximized; };
         Shown += (_,_) => { if (tabs.SelectedTab == play && launch.Enabled) launch.Focus(); };
+        Shown += async (_, _) => await CheckUpdates(false);
     }
 
     private void Launch()
@@ -397,10 +404,10 @@ internal sealed partial class MainForm : Form
 
     private void LoadSettings()
     {
-        output.Text = Path.Combine(AppContext.BaseDirectory, "user-builds");
+        output.Text = Path.Combine(LauncherUpdate.Home, "user-builds");
         try
         {
-            if (!File.Exists(settingsFile)) return;
+            if (!File.Exists(settingsFile)) { RestoreVrRuntime(""); return; }
             using var json = JsonDocument.Parse(File.ReadAllText(settingsFile));
             var settings = json.RootElement.Deserialize<LauncherSettings>();
             if (settings == null) return;
@@ -457,6 +464,7 @@ internal sealed partial class MainForm : Form
             timeOfDay.SelectedIndex = settings.RemasteredHour is >= 0 and < 24 ? settings.RemasteredHour : 12;
             SelectGraphicsProfile();
             smoothVrMotion.Checked = settings.SmoothVrMotion;
+            RestoreVrRuntime(OpenXrRuntime.SavedChoice(json.RootElement, settings.VrRuntime));
             RestoreNumber(vrRefresh, settings.VrRefresh); RestoreNumber(vrScale, settings.VrScale);
         }
         catch (Exception error) when (error is IOException or JsonException or UnauthorizedAccessException)
@@ -473,7 +481,7 @@ internal sealed partial class MainForm : Form
             RemasteredWeather: GameContent.WeatherIds[weather.SelectedIndex], RemasteredCamera: GameContent.CameraIds[camera.SelectedIndex],
             CameraLook: cameraLook.Checked, MaxCameraDistance: cameraDistance.Value, QuickRaceStyle: preferredStyle.ToString(), NormalStyle: normalStyle.ToString(),
             NormalVr: NormalVr, VrCar: VrCarId, ClassicSnes: classicSnes.Checked, HideRaceHud: hideRaceHud.Checked,
-            VrStyle: vrStyle.ToString(), SmoothVrMotion: smoothVrMotion.Checked, CustomContent: customContent.Checked,
+            VrStyle: vrStyle.ToString(), SmoothVrMotion: smoothVrMotion.Checked, VrRuntime: (vrRuntime.SelectedItem as OpenXrRuntime)?.Id ?? "", CustomContent: customContent.Checked,
             LauncherTheme: look.ToString(), ClassicLauncher: classicDefault, WpfTheme: wpfTheme, VrQuality: vrQuality, EnhancedPhysics: enhancedPhysics.Checked);
         var bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
         var size = IsHandleCreated && bounds.Width > 0 && bounds.Height > 0
@@ -526,6 +534,7 @@ internal sealed partial class MainForm : Form
         var compatible = record != null && (record.ContentVersion >= 1 || (CarId == "4wd" && !LaunchDisplay().Borderless)) &&
             record.ContentVersion >= GameContent.Course(CourseId).MinimumContentVersion;
         var stage = record == null ? null : Path.Combine(Path.GetFullPath(output.Text), "builds", record.Directory);
+        if (graphicsProfile.SelectedItem as string == "VR") lastVrSession.Text = OpenXrRuntime.LastSession(stage);
         var courseAvailable = stage != null && File.Exists(Path.Combine(GameContent.AssetDirectory(stage, LaunchCourse), "world.srfworld"));
         launch.Enabled = active == null && (NormalVr ? courseAvailable && record?.ContentVersion >= GameContent.SeamlessVersion
             : VrSelected ? courseAvailable && GameContent.SupportsVr(SelectedVrCourse, VrCarId, record?.ContentVersion ?? -1)
@@ -637,6 +646,10 @@ internal sealed partial class MainForm : Form
         base.Dispose(disposing);
     }
     private void ShowError(Exception error) { status.Text = "Failed — see Diagnostics."; AppendLog(error.Message); OpenSettings(filesPage); }
+    private readonly UpdatePrompt updatePrompt = new();
+    private Task CheckUpdates(bool manual) => updatePrompt.Check(manual,
+        () => !IsDisposed && Visible && active == null && networkPanel?.InLobby != true,
+        () => Handle, () => { Program.SwitchInterface(settingsFile, CurrentSettings(), true); switchingInterface = true; Close(); });
 
     private void AppendLog(string message)
     {

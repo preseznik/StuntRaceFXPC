@@ -29,7 +29,8 @@ void refresh_settings(){
                       D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
                       verify(d.Width==576 && d.Height==384,"75% eye size");++draws;
                   });
-        verify(draws==8 && test_refresh_request()==expected,"Unsupported or available headset refresh handling");
+        verify(draws==12 && test_refresh_request()==expected,"Unsupported or available headset refresh handling");
+        verify(log.str().find("Headset Test headset")!=std::string::npos,"Runtime-reported headset missing from VR diagnostics");
         verify(!test_hud_texture(),"Hidden HUD allocated a swapchain");
     }
     reset_test_runtime(false);

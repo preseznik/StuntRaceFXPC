@@ -84,6 +84,7 @@ internal partial class GridWindow : Window
         WireLobby();
         Loaded += async (_, _) => { ShowPage(Page.Play); await ReadBuild(); if (page == Page.Play) FocusPlayAction(); };
         Closing += OnClosing;
+        ContentRendered += async (_, _) => await CheckUpdates(false);
         PreviewKeyDown += WindowKey;
         padTimer.Interval = TimeSpan.FromMilliseconds(90); padTimer.Tick += (_, _) => PollPad();
         Activated += (_, _) => { lastButtons = ushort.MaxValue; padTimer.Start(); }; Deactivated += (_, _) => padTimer.Stop();

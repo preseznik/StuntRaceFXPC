@@ -48,6 +48,7 @@ internal sealed class MultiplayerPanel : UserControl
     private readonly Func<LanGrid, RaceStyle, Process> launch;
     private LanLobby? lobby;
     internal event Action<bool>? ConnectionChanged;
+    internal bool InLobby => busy || lobby is { Closed: false };
     private bool customContent;
     [System.ComponentModel.DefaultValue(false)]
     internal bool EnhancedPhysics { get; set; }
