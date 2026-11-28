@@ -14,7 +14,9 @@ Under **Settings → Graphics → VR**, **OpenXR runtime** defaults to Automatic
 
 Use **WASD** or the arrow keys to drive, **Space** to boost, and **P** to pause. Adjust gamepad bindings in **Settings → Controls**.
 
-The portable launcher checks for stable GitHub releases at startup. Use **Settings → Game files → Check for updates** to check manually. Accept the download to install a verified copy under `.launcher-updates`. Your usual shortcut opens the new version. Choose **Build game** to apply native game changes to your local build.
+Custom courses and vehicles are enabled by default for Quick Race and LAN. You can turn them off in **Settings → Content**.
+
+The portable launcher checks for stable GitHub releases at startup. Use **Settings → Game files → Check for updates** to check manually. Accept the download to install a verified copy under `.launcher-updates`. Your usual shortcut opens the new version. When an update changes the game, **Play → Rebuild game** uses your saved ROM and build folder. If you moved the ROM, choose its new location. You can keep playing the existing build and rebuild later.
 
 ## Build from source
 

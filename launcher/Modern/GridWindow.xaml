@@ -75,7 +75,7 @@
         <Button x:Name="Start" AutomationProperties.AutomationId="StartRace" Style="{StaticResource HeroButton}" Background="{DynamicResource Orange}" Foreground="{DynamicResource OnAccent}" BorderThickness="0" Click="StartGame" Content="START RACE"/>
         <Button x:Name="SetupButton" AutomationProperties.AutomationId="ChangeSetup" Style="{StaticResource HeroButton}" Click="OpenSetup" Content="CHANGE SETUP" Margin="0,9,0,0"/>
         <Button x:Name="HeroGraphics" Content="Graphics" Click="OpenGraphics" Margin="0,8,0,0"/>
-        <Button x:Name="Repair" Content="Open game files" Click="OpenFiles" Margin="0,8,0,0" Visibility="Collapsed"/>
+        <Button x:Name="Repair" Content="Open game files" Click="RepairGame" Margin="0,8,0,0" Visibility="Collapsed"/>
       </StackPanel>
     </Grid>
     <Grid x:Name="Setup" Visibility="Collapsed" Grid.Row="2" Grid.Column="1" Margin="22,18,22,10">
@@ -117,7 +117,7 @@
         </Grid>
       </DockPanel>
       <StackPanel x:Name="InlineActions" Grid.Row="1" Grid.Column="1" Margin="0,10,8,0">
-        <Button x:Name="InlineRepair" Content="Open game files" Click="OpenFiles" Margin="0,0,0,4" Visibility="{Binding Visibility,ElementName=Repair}"/>
+        <Button x:Name="InlineRepair" Content="{Binding Content,ElementName=Repair}" Click="RepairGame" Margin="0,0,0,4" Visibility="{Binding Visibility,ElementName=Repair}"/>
         <DockPanel>
           <Button x:Name="InlineGraphics" DockPanel.Dock="Right" Content="Graphics" Click="OpenGraphics" Margin="8,0,0,0"/>
           <Button x:Name="InlineStart" Content="{Binding Content,ElementName=Start}" IsEnabled="{Binding IsEnabled,ElementName=Start}" Click="StartGame" Style="{StaticResource Primary}"/>

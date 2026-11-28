@@ -77,7 +77,6 @@ internal sealed partial class MainForm
         var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
         footer.ColumnStyles.Add(new(SizeType.Percent, 100)); footer.ColumnStyles.Add(new(SizeType.AutoSize)); footer.ColumnStyles.Add(new(SizeType.AutoSize));
         status.Anchor = AnchorStyles.Left;
-        remedy.Click += (_, _) => OpenSettings(filesPage);
         footer.ColumnStyles.Add(new(SizeType.AutoSize));
         launch.Tag = SurfaceRole.Primary; footer.Controls.Add(status,0,0); footer.Controls.Add(remedy,1,0);
         footer.Controls.Add(changeSetup,2,0); footer.Controls.Add(launch,3,0);

@@ -157,6 +157,20 @@ internal static class CommandLine
         check(Load("game.sfc") == Path.Combine(package, "game.sfc"), "Portable races resolve the ROM beside user-builds");
         var external = Path.Combine(directory, "external ROM.sfc");
         check(Load(external) == external, "Local builds keep their external ROM path");
+        File.WriteAllText(external, "");
+        var selected = Path.Combine(package, "game.sfc");
+        File.WriteAllText(selected, "");
+        var current = record with { SourceSha256 = BuildPipeline.SourceDigest(BuildPipeline.FindSource()), RomPath = external };
+        var changed = current with { SourceSha256 = new string('0', 64) };
+        check(GameRebuild.Detect(null, external) == null && GameRebuild.Detect(current, external) == null,
+            "First run and launcher-only updates skip the rebuild offer");
+        check(GameRebuild.Detect(changed, "")?.Rom == external && GameRebuild.Detect(changed, selected)?.Rom == selected,
+            "A native update uses the selected ROM or falls back to the previous build's ROM");
+        check(GameRebuild.Detect(changed, Path.Combine(directory, "moved.sfc")) is { Rom: null },
+            "A missing selected ROM offers to locate it");
+        check(GameRebuild.Detect(current with { RecipeVersion = 0 }, external) != null &&
+            GameRebuild.Detect(changed with { ContentVersion = GameContent.CurrentVersion + 1 }, external) == null,
+            "Changed build steps need a rebuild and newer games are preserved");
     }
 
     private static void ReplayValidationChecks(Action<bool, string> check)
@@ -206,8 +220,11 @@ internal static class CommandLine
                     throw new InvalidDataException($"Unexpected {label} availability in {name}.");
             }
         }
+        if (!RaceLaunch.Read(path).CustomContent) throw new InvalidDataException("Custom content should default on in a new profile.");
         using (var form = new MainForm(path)) {
             _ = form.Handle;
+            CheckChoices(form, true);
+            Field<CheckBox>(form, "CustomContent").Checked = false;
             CheckChoices(form, false);
             Field<CheckBox>(form, "CustomContent").Checked = true;
             CheckChoices(form, true);
@@ -223,6 +240,11 @@ internal static class CommandLine
         CheckChoices(restored, false);
         if (Field<ComboBox>(restored, "PlayerCar").Text != "4WD" || Field<ComboBox>(restored, "Course").Text != "Easy Ride")
             throw new InvalidDataException("Disabling custom content left a hidden selection.");
+        _ = restored.Handle;
+        restored.Close();
+        if (RaceLaunch.Read(path).CustomContent) throw new InvalidDataException("An explicit custom content opt-out did not persist.");
+        using var disabled = new MainForm(path);
+        CheckChoices(disabled, false);
     }
     private static void LauncherChecks(string directory, Action<bool, string> check)
     {
@@ -296,7 +318,7 @@ internal static class CommandLine
                     if (launch.Enabled) throw new InvalidOperationException("Quick Race enabled without a build");
                     form.Shown += (_, _) => form.BeginInvoke(() =>
                     {
-                        car.SelectedIndex = 2; course.SelectedIndex = course.Items.Count - 1;
+                        car.SelectedIndex = 2; course.SelectedItem = GameContent.Courses[^1];
                         var target = (ComboBox)form.Controls.Find("DisplayTarget", true).Single();
                         target.SelectedItem = "VR";
                         ((ComboBox)form.Controls.Find("VrCourse", true).Single()).SelectedIndex = 1;
@@ -496,7 +518,7 @@ internal static class CommandLine
                     if (launch.Text != "Start race" || launch.Enabled != (version >= 28))
                         throw new InvalidOperationException($"Wrong Easy Ride VR availability for content version {version}");
                     var vrCourses = (ComboBox)form.Controls.Find("VrCourse", true).Single();
-                    if (!vrCourses.Items.Cast<GameCourse>().Select(c => c.Id).SequenceEqual(GameContent.Courses.Select(c => c.Id)))
+                    if (!vrCourses.Items.Cast<GameCourse>().SequenceEqual(GameContent.Courses.Concat(GameContent.CustomCourses)))
                         throw new InvalidOperationException("Wrong VR Quick Race course list");
                     vrCourses.SelectedIndex = 1;
                     if (launch.Enabled) throw new InvalidOperationException("Aqua Tunnel VR enabled without its world");

@@ -9,7 +9,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>StuntRaceFX.Launcher</AssemblyName>
-    <Version>0.1.131</Version>
+    <Version>0.1.132</Version>
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Modern/Fonts/BarlowCondensed-BoldItalic.ttf" />

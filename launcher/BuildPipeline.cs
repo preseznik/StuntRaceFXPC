@@ -65,11 +65,14 @@ internal sealed record BuildRecord(string Directory, string RomManifest, string 
 {
     public string RomPath { get; init; } = "";
     public int ContentVersion { get; init; }
+    public int RecipeVersion { get; init; } = 1; // Existing builds used the original recipe.
 }
 
 internal sealed class BuildPipeline(string source, Action<string> report)
 {
     internal static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
+    // Bump when launcher-side extraction or build steps change the installed game.
+    internal const int CurrentRecipeVersion = 1;
     private readonly string source = Path.GetFullPath(source);
 
     public static string FindSource()
@@ -192,8 +195,9 @@ internal sealed class BuildPipeline(string source, Action<string> report)
                     "--restart-check", "--screenshot", Path.Combine(stage, $"race-check-{course.Id}.png")], native, Log, cancel, toolchain);
                 ValidateRaceReplay(replay, course);
             }
-            var record = new BuildRecord(id, verified.RootElement.GetRawText(), SourceDigest(),
-                toolchain.Name, toolchain.DevelopmentOnly, DateTimeOffset.UtcNow) { RomPath = Path.GetFullPath(rom), ContentVersion = GameContent.CurrentVersion };
+            var record = new BuildRecord(id, verified.RootElement.GetRawText(), SourceDigest(source),
+                toolchain.Name, toolchain.DevelopmentOnly, DateTimeOffset.UtcNow)
+                { RomPath = Path.GetFullPath(rom), ContentVersion = GameContent.CurrentVersion, RecipeVersion = CurrentRecipeVersion };
             AtomicWrite(Path.Combine(stage, "build-record.json"), JsonSerializer.Serialize(record, JsonOptions));
             // Promotion is the final operation: no failed or cancelled build replaces the pointer.
             cancel.ThrowIfCancellationRequested();
@@ -239,7 +243,7 @@ internal sealed class BuildPipeline(string source, Action<string> report)
         // Always run CMake/build so source changes cannot leave a stale extractor in use.
         // CMake caches absolute paths: relocation needs a fresh cache even if source bytes match.
         var cacheKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            source + "\0" + Path.GetFullPath(output) + "\0" + SourceDigest())))[..16].ToLowerInvariant();
+            source + "\0" + Path.GetFullPath(output) + "\0" + SourceDigest(source))))[..16].ToLowerInvariant();
         var native = Path.Combine(Path.GetFullPath(output), "extractor", cacheKey);
         await ConfigureAsync(tools, native, null, log, cancel);
         await RunAsync(tools.CMake, ["--build", native, "--target", "srf_romtool", "--parallel", "4"], source, log, cancel, tools);
@@ -254,7 +258,7 @@ internal sealed class BuildPipeline(string source, Action<string> report)
         return RunAsync(tools.CMake, args, source, log, cancel, tools);
     }
 
-    private string SourceDigest()
+    internal static string SourceDigest(string source)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var files = new[] { Path.Combine(source, "CMakeLists.txt"), Path.Combine(source, ".tools", "toolchain.json"), Path.Combine(source, ".tools", "dependencies.json") }

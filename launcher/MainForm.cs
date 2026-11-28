@@ -143,11 +143,12 @@ internal sealed partial class MainForm : Form
         var fields = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, RowCount = 2, Margin = new Padding(0, 8, 0, 14) };
         fields.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140)); fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); fields.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var browseRom = new Button { Text = "Browse…", AutoSize = true };
-        browseRom.Click += (_, _) =>
+        string? ChooseRom()
         {
             using var dialog = new OpenFileDialog { Title = "Select Stunt Race FX USA Rev 1", Filter = "SNES ROM (*.sfc;*.smc)|*.sfc;*.smc|All files (*.*)|*.*", CheckFileExists = true };
-            if (dialog.ShowDialog(this) == DialogResult.OK) rom.Text = dialog.FileName;
-        };
+            return dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileName : null;
+        }
+        browseRom.Click += (_, _) => { if (ChooseRom() is string path) rom.Text = path; };
         var browseOutput = new Button { Text = "Browse…", AutoSize = true };
         browseOutput.Click += (_, _) =>
         {
@@ -214,7 +215,18 @@ internal sealed partial class MainForm : Form
         };
 
         verify.Click += async (_, _) => await ExecuteAsync(false, fields);
-        build.Click += async (_, _) => await ExecuteAsync(true, fields);
+        build.Click += async (_, _) =>
+        {
+            if (active != null) return;
+            if (rebuildOffer != null)
+            {
+                var path = File.Exists(rebuildOffer.Rom) ? rebuildOffer.Rom : ChooseRom();
+                if (path == null) return;
+                rom.Text = path;
+            }
+            await ExecuteAsync(true, fields);
+        };
+        remedy.Click += (_, _) => { OpenSettings(filesPage); if (rebuildOffer != null) build.PerformClick(); };
         cancel.Click += (_, _) => { active?.Cancel(); status.Text = "Cancelling the active build…"; };
         launch.Click += (_, _) => Launch();
         inspect.Click += (_, _) => { try { using var process = BuildPipeline.Launch(output.Text, inspectModels: true); } catch (Exception error) { ShowError(error); } };
@@ -229,6 +241,7 @@ internal sealed partial class MainForm : Form
             catch (Exception error) { ShowError(error); }
         };
         output.TextChanged += (_, _) => RefreshLaunch();
+        rom.TextChanged += (_, _) => RefreshLaunch();
         graphicsProfile.SelectedIndexChanged += (_, _) => {
             SelectGraphicsProfile();
             RefreshLaunch();
@@ -407,7 +420,12 @@ internal sealed partial class MainForm : Form
         output.Text = Path.Combine(LauncherUpdate.Home, "user-builds");
         try
         {
-            if (!File.Exists(settingsFile)) { RestoreVrRuntime(""); return; }
+            if (!File.Exists(settingsFile))
+            {
+                customContent.Checked = new LauncherSettings().CustomContent;
+                RestoreVrRuntime("");
+                return;
+            }
             using var json = JsonDocument.Parse(File.ReadAllText(settingsFile));
             var settings = json.RootElement.Deserialize<LauncherSettings>();
             if (settings == null) return;
@@ -505,6 +523,7 @@ internal sealed partial class MainForm : Form
         practice.Enabled = editable && physicsAvailable;
     }
 
+    private GameRebuild? rebuildOffer;
     private void RefreshLaunch()
     {
         if (car.SelectedItem == null || course.SelectedItem == null) return;
@@ -601,7 +620,8 @@ internal sealed partial class MainForm : Form
             : record?.ContentVersion >= GameContent.CameraVersion ? "C switches views. Enable camera control to scroll to zoom. Right-drag or move the right stick to look around in the other views. F2 or a right stick click recenters."
             : "Build the game from Game files to enable all Remastered graphics options.";
         graphicsProfile.Enabled = active == null;
-        availability.Text = record == null ? "" : $"Built {record.BuiltAt.ToLocalTime():d MMM yyyy}";
+        rebuildOffer = GameRebuild.Detect(record, rom.Text);
+        availability.Text = rebuildOffer?.Message ?? (record == null ? "" : $"Built {record.BuiltAt.ToLocalTime():d MMM yyyy}");
         if (active == null)
             status.Text = record == null ? "Choose your ROM and build the game to play."
                 : !launch.Enabled && !courseAvailable && (quick || VrSelected) ? $"{GameContent.Course(LaunchCourse).Name} is missing from this build."
@@ -613,8 +633,9 @@ internal sealed partial class MainForm : Form
                 : !launch.Enabled && VrSelected ? $"Rebuild from Game files to enable {vrCar.Text} on {SelectedVrCourse.Name} in VR."
                 : !launch.Enabled ? (quick ? "Rebuild from Game files to use this race selection." : "Choose Quick Race or rebuild for Normal mode.")
                 : !quick && record.ContentVersion < GameContent.OriginalBootVersion ? "Rebuild for the original Nintendo splash and menus."
-                : "Ready to launch.";
-        remedy.Visible = !launch.Enabled && active == null;
+                : rebuildOffer?.Message ?? "Ready to launch.";
+        remedy.Text = rebuildOffer?.ActionText ?? "Open game files…";
+        remedy.Visible = active == null && (!launch.Enabled || rebuildOffer != null);
         UpdateConditionsSummary(nightRace);
         string? path = null;
         if (stage != null && record != null)

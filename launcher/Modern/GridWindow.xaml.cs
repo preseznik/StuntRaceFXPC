@@ -180,7 +180,10 @@ internal partial class GridWindow : Window
             Start.Content = settings.QuickRace ? "START RACE" : "START GAME";
             var reason = installed.BlockReason(settings);
             Start.IsEnabled = reason == null && !starting && build == null;
-            Repair.Visibility = Show(reason != null); if (page == Page.Play) Say(loadError ?? buildReadError ?? reason);
+            var rebuild = RebuildOffer;
+            Repair.Content = rebuild?.ActionText ?? "Open game files";
+            Repair.Visibility = Show(build == null && (reason != null || rebuild != null));
+            if (page == Page.Play) Say(loadError ?? buildReadError ?? reason ?? rebuild?.Message);
             if (GalleryVisible) SyncSelectedTile();
         }
         finally { syncing = false; }
@@ -272,7 +275,11 @@ internal partial class GridWindow : Window
         qualityPresetFocus?.Focus();
     }
     private void OpenOptions(object sender, RoutedEventArgs e) { profile = RaceLaunch.Profile(settings); ShowPage(Page.Settings); }
-    private void OpenFiles(object sender, RoutedEventArgs e) { settingsSection = "Game files"; ShowPage(Page.Settings); }
+    private async void RepairGame(object sender, RoutedEventArgs e)
+    {
+        settingsSection = "Game files"; ShowPage(Page.Settings);
+        if (RebuildOffer != null && loadError == null) await RunBuild(true);
+    }
     private void Minimize(object sender, RoutedEventArgs e) => SystemCommands.MinimizeWindow(this);
     private void Maximize(object sender, RoutedEventArgs e) { if (WindowState == WindowState.Maximized) SystemCommands.RestoreWindow(this); else SystemCommands.MaximizeWindow(this); }
     private void Exit(object sender, RoutedEventArgs e) => Close();

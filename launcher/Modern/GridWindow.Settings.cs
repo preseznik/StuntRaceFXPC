@@ -247,18 +247,26 @@ internal partial class GridWindow
         () => new System.Windows.Interop.WindowInteropHelper(this).Handle,
         () => { Program.SwitchInterface(settingsFile, CurrentSettings(), false); switchingInterface = true; Close(); });
 
+    private GameRebuild? RebuildOffer => settings.OutputPath == loadedOutput ? GameRebuild.Detect(installed.Record, settings.RomPath) : null;
+
+    private string? ChooseRom()
+    {
+        var pick = new Microsoft.Win32.OpenFileDialog { Filter = "SNES ROM (*.sfc;*.smc)|*.sfc;*.smc|All files|*.*" };
+        return pick.ShowDialog(this) == true ? pick.FileName : null;
+    }
+
     private void FilesSettings()
     {
         var updates = Group($"Launcher · Build {GameContent.CurrentVersion}");
         ActionButton(updates, "Check for updates", () => _ = CheckUpdates(true), build == null && lobby is not { Closed: false });
         var group = Group("Local game files");
         if (buildReadError != null) Hint(group, buildReadError);
+        if (build == null && RebuildOffer is { } offer) Hint(group, offer.Message);
         var rom = new TextBox { Text = settings.RomPath, IsEnabled = build == null };
         var output = new TextBox { Text = settings.OutputPath, IsEnabled = build == null };
         Field(group, "Game ROM", rom); ActionButton(group, "Choose ROM…", () =>
         {
-            var pick = new Microsoft.Win32.OpenFileDialog { Filter = "SNES ROM (*.sfc;*.smc)|*.sfc;*.smc|All files|*.*" };
-            if (pick.ShowDialog(this) == true) rom.Text = pick.FileName;
+            if (ChooseRom() is string path) rom.Text = path;
         }, build == null);
         Field(group, "Build folder", output); ActionButton(group, "Choose folder…", () =>
         {
@@ -284,6 +292,12 @@ internal partial class GridWindow
     private async Task RunBuild(bool compile)
     {
         if (build != null) return;
+        if (compile && RebuildOffer is { } offer)
+        {
+            var path = offer.Rom ?? ChooseRom();
+            if (path == null) return;
+            settings = settings with { RomPath = path };
+        }
         using var cancel = new CancellationTokenSource(); build = cancel;
         try
         {

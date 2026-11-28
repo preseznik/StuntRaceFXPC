@@ -1,0 +1,20 @@
+Stunt Race FX PC — Build 132
+Changes since Build 131
+
+Rebuild your game after an update
+
+Modern and Classic now check whether your installed game was built with the native game files and build steps in the updated launcher. If it needs a rebuild, open Play and choose Rebuild game. The launcher uses your saved ROM and build folder. If the ROM has moved, choose its new location when prompted.
+
+You can keep playing and rebuild later. If you cancel or the rebuild fails, your previous game remains available. After a successful rebuild, the new game becomes active and the offer disappears.
+
+Custom content is on by default
+
+Ember Mesa, Kasumi Inner Loop, HILLY and CARGO are available in Quick Race and LAN when you start with a new profile or one that has no saved custom content preference. You can change this under Settings → Content. If you previously saved the toggle as off, it stays off.
+
+Getting Build 132
+
+If you already built the game with Build 131, it is current for this release. Open your Build 131 launcher and accept the update, or use Settings → Game files → Check for updates.
+
+From Build 130 or earlier, close the launcher and extract StuntRaceFXPC-Portable-Launcher-Build-132.zip into your existing portable folder. Open StuntRaceFX.Launcher.exe and look on Play for the rebuild offer.
+
+For a first installation, extract the ZIP to a writable folder. In Settings → Game files, select your own Stunt Race FX (USA) (Rev 1) ROM and choose Build game.

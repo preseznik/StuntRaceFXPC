@@ -122,7 +122,7 @@ internal static class GameContent
     internal const int FourDriverLanVersion = 119;
     internal const int EnhancedPhysicsVersion = 124;
     internal const int RacerPhysicsVersion = 129;
-    internal const int CurrentVersion = 131;
+    internal const int CurrentVersion = 132;
     internal static string DrivingPhysicsHelp =>
         "Applies to practice, Quick Race and LAN races you host. Hold Shift or the right bumper and steer at speed. " +
         "Blue sparks mean you can release for a boost (0.7 seconds). Gold sparks mean full boost (2 seconds). " +
